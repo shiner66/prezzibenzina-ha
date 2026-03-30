@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Location and search radius",
+        "description": "Set the reference point and the radius to search for fuel stations.",
+        "data": {
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "radius_km": "Search radius (km)",
+          "entry_title": "Name for this location"
+        }
+      },
+      "fuel_types": {
+        "title": "Fuel types",
+        "description": "Select the fuel types you want to monitor.",
+        "data": {
+          "fuel_types": "Fuel types",
+          "include_self": "Include self-service",
+          "include_servito": "Include full-service"
+        }
+      },
+      "advanced": {
+        "title": "Advanced settings",
+        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.",
+        "data": {
+          "top_n": "Number of stations in ranking",
+          "update_interval_h": "Update interval (hours)",
+          "ai_provider": "AI provider (optional)",
+          "ai_api_key": "AI API key"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the MIMIT server. Please check your internet connection."
+    },
+    "abort": {
+      "already_configured": "An integration for this location is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Carburanti MIMIT options",
+        "data": {
+          "radius_km": "Search radius (km)",
+          "fuel_types": "Fuel types",
+          "include_self": "Include self-service",
+          "include_servito": "Include full-service",
+          "top_n": "Number of stations in ranking",
+          "update_interval_h": "Update interval (hours)",
+          "ai_provider": "AI provider (optional)",
+          "ai_api_key": "AI API key"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "domain": "carburanti_mimit",
+  "name": "Carburanti MIMIT",
+  "version": "1.0.0",
+  "config_flow": true,
+  "documentation": "https://github.com/shiner66/prezzibenzina-ha",
+  "issue_tracker": "https://github.com/shiner66/prezzibenzina-ha/issues",
+  "codeowners": ["@shiner66"],
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "dependencies": ["recorder"],
+  "after_dependencies": ["zone"],
+  "homeassistant": "2024.1.0"
+}

@@ -1,0 +1,110 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Posizione e raggio di ricerca",
+        "description": "Configura il punto di riferimento e il raggio entro cui cercare i distributori.",
+        "data": {
+          "latitude": "Latitudine",
+          "longitude": "Longitudine",
+          "radius_km": "Raggio di ricerca (km)",
+          "entry_title": "Nome per questa posizione"
+        }
+      },
+      "fuel_types": {
+        "title": "Tipi di carburante",
+        "description": "Seleziona i tipi di carburante da monitorare.",
+        "data": {
+          "fuel_types": "Tipi di carburante",
+          "include_self": "Includi self-service",
+          "include_servito": "Includi servito"
+        }
+      },
+      "advanced": {
+        "title": "Impostazioni avanzate",
+        "description": "Configura il numero di distributori in classifica, l'intervallo di aggiornamento e l'AI opzionale per l'analisi delle tendenze.",
+        "data": {
+          "top_n": "Numero di distributori in classifica",
+          "update_interval_h": "Intervallo di aggiornamento (ore)",
+          "ai_provider": "Provider AI (opzionale)",
+          "ai_api_key": "Chiave API AI"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossibile connettersi al server MIMIT. Verifica la connessione internet."
+    },
+    "abort": {
+      "already_configured": "Una integrazione per questa posizione è già configurata."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opzioni Carburanti MIMIT",
+        "data": {
+          "radius_km": "Raggio di ricerca (km)",
+          "fuel_types": "Tipi di carburante",
+          "include_self": "Includi self-service",
+          "include_servito": "Includi servito",
+          "top_n": "Numero di distributori in classifica",
+          "update_interval_h": "Intervallo di aggiornamento (ore)",
+          "ai_provider": "Provider AI (opzionale)",
+          "ai_api_key": "Chiave API AI"
+        }
+      }
+    }
+  },
+  "services": {
+    "force_refresh": {
+      "name": "Aggiorna ora",
+      "description": "Forza un aggiornamento immediato dei prezzi carburante.",
+      "fields": {
+        "entry_id": {
+          "name": "ID integrazione",
+          "description": "ID della configurazione da aggiornare. Se omesso, aggiorna tutte le configurazioni."
+        }
+      }
+    },
+    "get_cheapest_near": {
+      "name": "Trova distributori più economici vicino a",
+      "description": "Restituisce i distributori più economici per un tipo di carburante vicino a una posizione arbitraria.",
+      "fields": {
+        "latitude": {
+          "name": "Latitudine",
+          "description": "Latitudine del punto di ricerca."
+        },
+        "longitude": {
+          "name": "Longitudine",
+          "description": "Longitudine del punto di ricerca."
+        },
+        "fuel_type": {
+          "name": "Tipo carburante",
+          "description": "Tipo di carburante da cercare."
+        },
+        "radius_km": {
+          "name": "Raggio (km)",
+          "description": "Raggio di ricerca in chilometri (0.5–100)."
+        },
+        "top_n": {
+          "name": "Numero risultati",
+          "description": "Numero massimo di distributori da restituire."
+        }
+      }
+    },
+    "clear_history": {
+      "name": "Cancella storico prezzi",
+      "description": "Cancella lo storico locale dei prezzi per un'integrazione.",
+      "fields": {
+        "entry_id": {
+          "name": "ID integrazione",
+          "description": "ID della configurazione di cui cancellare lo storico."
+        },
+        "fuel_type": {
+          "name": "Tipo carburante",
+          "description": "Tipo di carburante da cancellare (opzionale; se omesso cancella tutto)."
+        }
+      }
+    }
+  }
+}
