@@ -1,8 +1,11 @@
 name: Validate
 
+# Runs on branch pushes and PRs only.
+# Tag pushes are handled by release.yml which also validates before publishing.
 on:
   push:
     branches: ["main", "master", "claude/**"]
+    tags-ignore: ["v*"]
   pull_request:
     branches: ["main", "master"]
 
