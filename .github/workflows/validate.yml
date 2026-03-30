@@ -1,0 +1,55 @@
+name: Validate
+
+on:
+  push:
+    branches: ["main", "master", "claude/**"]
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  hassfest:
+    name: Hassfest validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run hassfest
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  lint:
+    name: Lint JSON/YAML
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate JSON files
+        run: |
+          for f in $(find . -name "*.json" -not -path "./.git/*"); do
+            python -c "import json, sys; json.load(open('$f'))" && echo "OK: $f" || exit 1
+          done
+
+      - name: Validate YAML files
+        run: |
+          pip install pyyaml
+          for f in $(find . -name "*.yaml" -o -name "*.yml" | grep -v ".git"); do
+            python -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f" || exit 1
+          done

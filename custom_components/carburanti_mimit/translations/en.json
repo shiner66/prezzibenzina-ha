@@ -54,5 +54,26 @@
         }
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "cheapest": {
+        "name": "{fuel_type} – Cheapest Price"
+      },
+      "average": {
+        "name": "{fuel_type} – Average Price"
+      },
+      "trend": {
+        "name": "{fuel_type} – Trend",
+        "state": {
+          "up": "Rising",
+          "down": "Falling",
+          "stable": "Stable"
+        }
+      },
+      "prediction": {
+        "name": "{fuel_type} – Prediction"
+      }
+    }
   }
 }

@@ -1,0 +1,112 @@
+# Descrizione servizi: usa strings.json per localizzazione
+# Questo file definisce lo schema dei campi per l'UI di Home Assistant (Developer Tools → Azioni)
+
+force_refresh:
+  name: Aggiorna ora
+  description: Forza un aggiornamento immediato dei prezzi carburante dal server MIMIT.
+  fields:
+    entry_id:
+      name: ID integrazione
+      description: >
+        ID della configurazione da aggiornare (visibile in Impostazioni → Dispositivi e servizi).
+        Se omesso, aggiorna tutte le configurazioni Carburanti MIMIT.
+      required: false
+      example: "abc123def456"
+      selector:
+        text:
+
+get_cheapest_near:
+  name: Trova distributori più economici vicino a
+  description: >
+    Restituisce i distributori più economici per un tipo di carburante vicino a una posizione
+    arbitraria. Utilizzabile con response_variable nelle automazioni.
+  fields:
+    latitude:
+      name: Latitudine
+      description: Latitudine del punto di ricerca (WGS-84).
+      required: true
+      example: 45.4642
+      selector:
+        number:
+          min: -90
+          max: 90
+          step: 0.0001
+          mode: box
+    longitude:
+      name: Longitudine
+      description: Longitudine del punto di ricerca (WGS-84).
+      required: true
+      example: 9.1900
+      selector:
+        number:
+          min: -180
+          max: 180
+          step: 0.0001
+          mode: box
+    fuel_type:
+      name: Tipo carburante
+      description: Tipo di carburante da cercare.
+      required: true
+      example: "Benzina"
+      selector:
+        select:
+          options:
+            - "Benzina"
+            - "Gasolio"
+            - "GPL"
+            - "Metano"
+            - "HVO"
+            - "Gasolio Riscaldamento"
+    radius_km:
+      name: Raggio (km)
+      description: Raggio di ricerca in chilometri (0.5–100). Default 5 km.
+      required: false
+      default: 5
+      example: 10
+      selector:
+        number:
+          min: 0.5
+          max: 100
+          step: 0.5
+          unit_of_measurement: km
+    top_n:
+      name: Numero risultati
+      description: Numero massimo di distributori da restituire (1–20). Default 3.
+      required: false
+      default: 3
+      example: 5
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+          mode: slider
+
+clear_history:
+  name: Cancella storico prezzi
+  description: >
+    Cancella lo storico locale dei prezzi (ultimi 90 giorni) per un'integrazione.
+    Non influisce sui dati nel recorder di Home Assistant.
+  fields:
+    entry_id:
+      name: ID integrazione
+      description: ID della configurazione di cui cancellare lo storico.
+      required: true
+      example: "abc123def456"
+      selector:
+        text:
+    fuel_type:
+      name: Tipo carburante
+      description: >
+        Tipo di carburante da cancellare. Se omesso, cancella lo storico di tutti i tipi.
+      required: false
+      example: "Benzina"
+      selector:
+        select:
+          options:
+            - "Benzina"
+            - "Gasolio"
+            - "GPL"
+            - "Metano"
+            - "HVO"
+            - "Gasolio Riscaldamento"
