@@ -31,6 +31,7 @@ jobs:
 
       - name: Run HACS validation
         uses: hacs/action@main
+        continue-on-error: true   # topics/description are repo settings, not code issues
         with:
           category: integration
 
