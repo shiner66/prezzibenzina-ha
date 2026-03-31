@@ -154,7 +154,7 @@ class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
     """Price trend indicator: 'up', 'down', or 'stable'.
 
     State  → trend string
-    Attributes → weekly/monthly change percentages
+    Attributes → weekly/monthly change percentages + statistical indicators
     """
 
     _attr_state_class = None
@@ -186,6 +186,9 @@ class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
             "weekly_change_pct": self._prediction.weekly_change_pct,
             "monthly_change_pct": self._prediction.monthly_change_pct,
             "trend_pct_7d": self._prediction.trend_pct_7d,
+            "price_volatility": self._prediction.price_volatility,
+            "price_momentum": self._prediction.price_momentum,
+            "price_acceleration": self._prediction.price_acceleration,
         }
 
     def _handle_coordinator_update(self) -> None:
@@ -199,7 +202,7 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
     """Predicted price for tomorrow based on 30-day history.
 
     State  → tomorrow's predicted price (float)
-    Attributes → 7-day forecast, confidence, method, optional AI analysis
+    Attributes → 7-day forecast, confidence, method, geopolitical AI analysis
     """
 
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -218,6 +221,7 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
         self._prediction: PredictionResult | None = None
         self._ai_analysis: str | None = None
+        self._ai_risk_level: str | None = None
 
     @property
     def available(self) -> bool:
@@ -241,7 +245,11 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
             "method": self._prediction.method_used,
             "trend_direction": self._prediction.trend_direction,
             "trend_pct_7d": self._prediction.trend_pct_7d,
+            "price_volatility": self._prediction.price_volatility,
+            "price_momentum": self._prediction.price_momentum,
+            "price_acceleration": self._prediction.price_acceleration,
             "ai_analysis": self._ai_analysis,
+            "ai_risk_level": self._ai_risk_level,
         }
 
     def _handle_coordinator_update(self) -> None:
@@ -249,7 +257,6 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         history = self.coordinator._storage.get_history(self._fuel_type, days=30)
         self._prediction = compute_prediction(history, self._fuel_type)
 
-        # Trigger async AI enrichment (fire-and-forget; result stored in next update)
         ai_provider = self._config_entry.options.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
         ai_key = self._config_entry.options.get(CONF_AI_API_KEY, "")
         if (
@@ -257,7 +264,9 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
             and ai_provider != AI_PROVIDER_NONE
             and ai_key
         ):
-            self.hass.async_create_task(self._async_fetch_ai_analysis(ai_provider, ai_key, history))
+            self.hass.async_create_task(
+                self._async_fetch_ai_analysis(ai_provider, ai_key, history)
+            )
 
         super()._handle_coordinator_update()
 
@@ -267,11 +276,11 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         api_key: str,
         history: list,
     ) -> None:
-        """Fetch AI analysis and trigger a state write."""
+        """Fetch AI geopolitical analysis and trigger a state write."""
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
         session = async_get_clientsession(self.hass)
-        result = await async_ai_prediction(
+        analysis, risk_level = await async_ai_prediction(
             session,
             provider,
             api_key,
@@ -279,6 +288,7 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
             self._fuel_type,
             self._prediction,  # type: ignore[arg-type]
         )
-        if result != self._ai_analysis:
-            self._ai_analysis = result
+        if analysis != self._ai_analysis or risk_level != self._ai_risk_level:
+            self._ai_analysis = analysis
+            self._ai_risk_level = risk_level
             self.async_write_ha_state()

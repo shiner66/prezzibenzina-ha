@@ -1,13 +1,13 @@
 name: Validate
 
-# Runs on branch pushes and PRs only.
-# Tag pushes are handled by release.yml which also validates before publishing.
+# Runs on branch pushes and pull requests.
+# Tag pushes are handled by release.yml (which also validates before publishing).
 on:
   push:
-    branches: ["main", "master", "claude/**"]
+    branches: ["main", "claude/**"]
     tags-ignore: ["v*"]
   pull_request:
-    branches: ["main", "master"]
+    branches: ["main"]
 
 jobs:
   hassfest:
@@ -29,7 +29,11 @@ jobs:
 
       - name: HACS validation
         uses: hacs/action@main
-        continue-on-error: true   # topics/description are repo settings, not code issues
+        # continue-on-error is intentional: HACS validation requires:
+        #   1. At least one published GitHub release (chicken-and-egg on first run)
+        #   2. The "hacshomeassistant" topic set on the repository (GitHub UI setting)
+        # Code-level issues (manifest, file structure) will still surface in the logs.
+        continue-on-error: true
         with:
           category: integration
 
@@ -53,7 +57,7 @@ jobs:
 
       - name: Validate YAML files
         run: |
-          pip install pyyaml
+          pip install --quiet pyyaml
           for f in $(find . -name "*.yaml" -o -name "*.yml" | grep -v ".git"); do
             python -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f" || exit 1
           done

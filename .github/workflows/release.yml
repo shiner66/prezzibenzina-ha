@@ -1,21 +1,19 @@
 name: Release
 
-# Triggers either on a tag push (vX.Y.Z / vX.Y.Z-suffix)
-# or manually from the Actions UI (workflow_dispatch).
+# Triggers on a version tag push (vX.Y.Z or vX.Y.Z-suffix)
+# or manually from the Actions UI.
+#
+# Tag push examples:
+#   v1.0.0          → stable release (marked as latest)
+#   v1.0.1-beta.1   → pre-release
 #
 # Manual dispatch: Actions → Release → Run workflow → enter version
 #   e.g. "1.0.0" for stable, "1.0.1-beta.1" for pre-release
-#
-# Tag push examples:
-#   v1.0.0          → stable release  (latest)
-#   v1.0.1-beta.1   → pre-release
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
-    branches:
-      - "release/v*"   # e.g. release/v1.0.0 or release/v1.0.1-beta.1
   workflow_dispatch:
     inputs:
       version:
@@ -24,7 +22,7 @@ on:
         type: string
 
 permissions:
-  contents: write   # needed to create GitHub releases, tags, and upload assets
+  contents: write   # create releases, tags, push manifest bump commit
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
@@ -42,7 +40,10 @@ jobs:
 
       - name: Run HACS validation
         uses: hacs/action@main
-        continue-on-error: true   # topics/description are repo settings, not code issues
+        # continue-on-error: topics/description are GitHub repo settings (UI),
+        # not code issues. HACS also requires at least one published release,
+        # so the first run will fail here — that is expected.
+        continue-on-error: true
         with:
           category: integration
 
@@ -75,21 +76,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history needed so we can commit the manifest bump
+          fetch-depth: 0
 
       # ── Version detection ──────────────────────────────────────────────
       - name: Extract version from tag or input
         id: version
         run: |
-          # Determine source: tag push, branch push, or workflow_dispatch input
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
             RAW_TAG="v${VERSION}"
-          elif echo "${GITHUB_REF_NAME}" | grep -qE '^release/'; then
-            # Branch push: release/v1.0.0 → strip "release/" prefix
-            RAW_TAG="${GITHUB_REF_NAME#release/}"   # → v1.0.0
-            VERSION="${RAW_TAG#v}"                   # → 1.0.0
           else
-            RAW_TAG="${GITHUB_REF_NAME}"             # tag push: v1.0.1-beta.1
+            # Tag push: refs/tags/v1.0.0 → v1.0.0
+            RAW_TAG="${GITHUB_REF_NAME}"
             VERSION="${RAW_TAG#v}"
           fi
 
@@ -112,23 +112,28 @@ jobs:
           echo "Version    : $VERSION"
           echo "Pre-release: $IS_PRERELEASE"
 
-      # ── Create git tag (skipped for tag pushes — they already have one) ──
+      # ── Create git tag for workflow_dispatch (tag pushes already have one) ──
       - name: Create and push git tag
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/release/')
+        if: github.event_name == 'workflow_dispatch'
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
 
-      # ── Update manifest.json version ──────────────────────────────────
+          # Fail gracefully if tag already exists
+          if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already exists — skipping tag creation"
+          else
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+      # ── Update manifest.json version and commit it ─────────────────────
       - name: Bump version in manifest.json
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           MANIFEST="custom_components/carburanti_mimit/manifest.json"
 
-          # Use Python for safe JSON manipulation (avoids jq dependency issues)
           python - <<EOF
           import json, pathlib
           p = pathlib.Path("$MANIFEST")
@@ -138,9 +143,21 @@ jobs:
           print(f"manifest.json version set to {data['version']}")
           EOF
 
+      - name: Commit manifest version bump
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add custom_components/carburanti_mimit/manifest.json
+          if git diff --cached --quiet; then
+            echo "manifest.json already at version $VERSION — no commit needed"
+          else
+            git commit -m "chore: bump manifest version to $VERSION [skip ci]"
+            git push origin HEAD:main
+          fi
+
       # ── Build ZIP for HACS ─────────────────────────────────────────────
-      # HACS can install from raw repo structure, but a versioned ZIP lets
-      # users download / pin a specific release manually.
       - name: Create release archive
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -159,7 +176,6 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           IS_PRERELEASE="${{ steps.version.outputs.is_prerelease }}"
-          RELEASE_TYPE="${{ steps.version.outputs.release_type }}"
 
           if [ "$IS_PRERELEASE" = "true" ]; then
             BADGE="⚠️ **Pre-release** — potrebbe contenere modifiche sperimentali. Non usare in produzione senza aver testato."
@@ -167,7 +183,7 @@ jobs:
             BADGE="✅ **Release stabile**"
           fi
 
-          NOTES=$(cat <<MARKDOWN
+          cat > /tmp/release_notes.md <<MARKDOWN
           ## Carburanti MIMIT ${VERSION}
 
           ${BADGE}
@@ -187,10 +203,7 @@ jobs:
 
           Vedi i commit inclusi in questa release per il dettaglio delle modifiche.
           MARKDOWN
-          )
 
-          # Write to a temp file to handle multi-line output safely
-          echo "$NOTES" > /tmp/release_notes.md
           echo "notes_file=/tmp/release_notes.md" >> "$GITHUB_OUTPUT"
 
       # ── Create GitHub Release ──────────────────────────────────────────
@@ -201,8 +214,7 @@ jobs:
           name: "Carburanti MIMIT ${{ steps.version.outputs.version }}"
           body_path: ${{ steps.notes.outputs.notes_file }}
           prerelease: ${{ steps.version.outputs.is_prerelease }}
-          # mark stable releases as "latest"; pre-releases are never "latest"
-          make_latest: ${{ steps.version.outputs.is_prerelease == 'false' && 'true' || 'false' }}
+          make_latest: ${{ steps.version.outputs.is_prerelease == 'false' }}
           files: |
             ${{ env.zipfile }}
-          generate_release_notes: true   # appends auto-generated commit list
+          generate_release_notes: true
