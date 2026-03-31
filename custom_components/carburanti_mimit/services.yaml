@@ -1,9 +1,8 @@
-# Descrizione servizi: usa strings.json per localizzazione
-# Questo file definisce lo schema dei campi per l'UI di Home Assistant (Developer Tools → Azioni)
+# Schema campi per i servizi Carburanti MIMIT.
+# name e description di ogni servizio sono definiti in strings.json (localizzabili).
+# Questo file definisce solo lo schema/selectors dei campi.
 
 force_refresh:
-  name: Aggiorna ora
-  description: Forza un aggiornamento immediato dei prezzi carburante dal server MIMIT.
   fields:
     entry_id:
       name: ID integrazione
@@ -16,10 +15,6 @@ force_refresh:
         text:
 
 get_cheapest_near:
-  name: Trova distributori più economici vicino a
-  description: >
-    Restituisce i distributori più economici per un tipo di carburante vicino a una posizione
-    arbitraria. Utilizzabile con response_variable nelle automazioni.
   fields:
     latitude:
       name: Latitudine
@@ -83,10 +78,6 @@ get_cheapest_near:
           mode: slider
 
 clear_history:
-  name: Cancella storico prezzi
-  description: >
-    Cancella lo storico locale dei prezzi (ultimi 90 giorni) per un'integrazione.
-    Non influisce sui dati nel recorder di Home Assistant.
   fields:
     entry_id:
       name: ID integrazione

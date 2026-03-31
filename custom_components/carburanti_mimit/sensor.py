@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
@@ -19,7 +18,6 @@ from .const import (
     CONF_AI_PROVIDER,
     CONF_FUEL_TYPES,
     DEFAULT_FUEL_TYPES,
-    DOMAIN,
     FUEL_UNITS,
     SENSOR_AVERAGE,
     SENSOR_CHEAPEST,
