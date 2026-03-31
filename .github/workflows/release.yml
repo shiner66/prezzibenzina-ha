@@ -1,17 +1,17 @@
 name: Release
 
 # Triggers:
+#   push to main                  → stable release with auto-incremented patch version
 #   push to any non-main branch   → beta pre-release for that branch
 #                                    (old beta for the same branch is deleted first)
 #   tag push  vX.Y.Z              → stable release (kept forever, marked as latest)
 #   tag push  vX.Y.Z-*            → explicit pre-release (kept forever)
 #   workflow_dispatch             → manual stable/pre-release from Actions UI
-#
-# Push to main → no automatic release (use a tag or workflow_dispatch).
 on:
   push:
-    branches-ignore:
+    branches:
       - main
+      - "**"
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
@@ -87,8 +87,19 @@ jobs:
 
           BASE_VERSION=$(python -c "import json; print(json.load(open('custom_components/carburanti_mimit/manifest.json'))['version'])")
 
-          if [ "$EVENT" = "push" ] && [[ "$REF" == refs/heads/* ]]; then
-            # ── Beta from branch push ──────────────────────────────────
+          if [ "$EVENT" = "push" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
+            # ── Stable release from main push: auto-increment patch ────
+            MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
+            MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
+            PATCH=$(echo "$BASE_VERSION" | cut -d. -f3 | cut -d- -f1)
+            NEW_PATCH=$((PATCH + 1))
+            VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+            TAG="v${VERSION}"
+            IS_PRERELEASE=false
+            IS_BETA=false
+
+          elif [ "$EVENT" = "push" ] && [[ "$REF" == refs/heads/* ]]; then
+            # ── Beta from non-main branch push ─────────────────────────
             BRANCH="${GITHUB_REF_NAME}"
             # Sanitize: replace every / and non-alphanumeric char with -
             BRANCH_SLUG=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//')
@@ -157,9 +168,9 @@ jobs:
           git tag -a "$TAG" -m "Beta release ${{ steps.version.outputs.version }}"
           git push origin "$TAG"
 
-      # ── Stable only: create tag for workflow_dispatch ─────────────────
-      - name: Create stable tag (workflow_dispatch)
-        if: steps.version.outputs.is_beta != 'true' && github.event_name == 'workflow_dispatch'
+      # ── Stable only: create tag for main push or workflow_dispatch ───
+      - name: Create stable tag (main push or workflow_dispatch)
+        if: steps.version.outputs.is_beta != 'true' && (github.event_name == 'workflow_dispatch' || github.ref_name == 'main')
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           git config user.name  "github-actions[bot]"
