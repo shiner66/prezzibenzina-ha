@@ -25,7 +25,7 @@ get_cheapest_near:
         number:
           min: -90
           max: 90
-          step: 0.0001
+          step: "any"
           mode: box
     longitude:
       name: Longitudine
@@ -36,7 +36,7 @@ get_cheapest_near:
         number:
           min: -180
           max: 180
-          step: 0.0001
+          step: "any"
           mode: box
     fuel_type:
       name: Tipo carburante

@@ -9,6 +9,5 @@
   "iot_class": "cloud_polling",
   "requirements": [],
   "dependencies": ["recorder"],
-  "after_dependencies": ["zone"],
-  "homeassistant": "2024.1.0"
+  "after_dependencies": ["zone"]
 }
