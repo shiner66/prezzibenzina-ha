@@ -18,12 +18,9 @@ from .const import DOMAIN, FUEL_UNITS, SENSOR_AVERAGE, SENSOR_CHEAPEST, STATISTI
 
 _LOGGER = logging.getLogger(__name__)
 
-# StatisticMeanType may be in different locations depending on HA version
-try:
-    from homeassistant.components.recorder.models import StatisticMeanType
-    _MEAN_TYPE = StatisticMeanType.ARITHMETIC
-except ImportError:
-    _MEAN_TYPE = None  # Older HA versions: omit the field
+from homeassistant.components.recorder.models import StatisticMeanType
+
+_MEAN_TYPE = StatisticMeanType.ARITHMETIC
 
 
 def _fuel_slug(fuel_type: str) -> str:
@@ -48,17 +45,15 @@ def _build_metadata(
     fuel_type: str,
 ) -> StatisticMetaData:
     """Build a StatisticMetaData object."""
-    kwargs: dict = {
-        "has_sum": False,
-        "name": name,
-        "source": STATISTICS_SOURCE,
-        "statistic_id": statistic_id,
-        "unit_class": None,
-        "unit_of_measurement": FUEL_UNITS.get(fuel_type, "EUR/L"),
-    }
-    if _MEAN_TYPE is not None:
-        kwargs["mean_type"] = _MEAN_TYPE
-    return StatisticMetaData(**kwargs)
+    return StatisticMetaData(
+        has_sum=False,
+        mean_type=_MEAN_TYPE,
+        name=name,
+        source=STATISTICS_SOURCE,
+        statistic_id=statistic_id,
+        unit_class=None,
+        unit_of_measurement=FUEL_UNITS.get(fuel_type, "EUR/L"),
+    )
 
 
 async def async_push_price_statistics(

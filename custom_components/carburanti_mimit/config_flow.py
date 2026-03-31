@@ -90,10 +90,10 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(
             {
                 vol.Required(CONF_LATITUDE, default=default_lat): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=-90, max=90, step=0.0001, mode="box")
+                    selector.NumberSelectorConfig(min=-90, max=90, step="any", mode="box")
                 ),
                 vol.Required(CONF_LONGITUDE, default=default_lon): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=-180, max=180, step=0.0001, mode="box")
+                    selector.NumberSelectorConfig(min=-180, max=180, step="any", mode="box")
                 ),
                 vol.Required(CONF_RADIUS_KM, default=DEFAULT_RADIUS_KM): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=100, step=1, mode="slider", unit_of_measurement="km")
