@@ -55,6 +55,27 @@
       }
     }
   },
+  "entity": {
+    "sensor": {
+      "cheapest": {
+        "name": "{fuel_type} – Prezzo Minimo"
+      },
+      "average": {
+        "name": "{fuel_type} – Prezzo Medio"
+      },
+      "trend": {
+        "name": "{fuel_type} – Tendenza",
+        "state": {
+          "up": "In salita",
+          "down": "In discesa",
+          "stable": "Stabile"
+        }
+      },
+      "prediction": {
+        "name": "{fuel_type} – Previsione"
+      }
+    }
+  },
   "services": {
     "force_refresh": {
       "name": "Aggiorna ora",

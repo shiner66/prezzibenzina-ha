@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from statistics import mean
@@ -93,7 +94,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._registry_fetched_at: datetime | None = None
 
         # Schedule daily refresh at MIMIT publish time (08:15 Europe/Rome)
-        self._unsub_daily: callback | None = None
+        self._unsub_daily: Callable[[], None] | None = None
 
     # ------------------------------------------------------------------
     # Public lifecycle

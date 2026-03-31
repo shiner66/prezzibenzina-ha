@@ -1,0 +1,27 @@
+{
+  "entity": {
+    "sensor": {
+      "cheapest": {
+        "default": "mdi:gas-station"
+      },
+      "average": {
+        "default": "mdi:gas-station-outline"
+      },
+      "trend": {
+        "default": "mdi:trending-neutral",
+        "state": {
+          "up": "mdi:trending-up",
+          "down": "mdi:trending-down"
+        }
+      },
+      "prediction": {
+        "default": "mdi:crystal-ball"
+      }
+    }
+  },
+  "services": {
+    "force_refresh": "mdi:refresh",
+    "get_cheapest_near": "mdi:map-search",
+    "clear_history": "mdi:delete-clock"
+  }
+}

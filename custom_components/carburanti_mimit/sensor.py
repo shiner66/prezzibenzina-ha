@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
 )
@@ -19,8 +18,6 @@ from .const import (
     CONF_AI_PROVIDER,
     CONF_FUEL_TYPES,
     DEFAULT_FUEL_TYPES,
-    DOMAIN,
-    FUEL_ICONS,
     FUEL_UNITS,
     SENSOR_AVERAGE,
     SENSOR_CHEAPEST,
@@ -86,8 +83,8 @@ class CheapestPriceSensor(CarburantiMimitEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, config_entry, fuel_type)
         self._attr_unique_id = f"{config_entry.entry_id}_{fuel_type}_{SENSOR_CHEAPEST}"
-        self._attr_name = f"{fuel_type} – Prezzo Minimo"
-        self._attr_icon = FUEL_ICONS.get(fuel_type, "mdi:gas-station")
+        self._attr_translation_key = SENSOR_CHEAPEST
+        self._attr_translation_placeholders = {"fuel_type": fuel_type}
         self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
 
     @property
@@ -136,8 +133,8 @@ class AveragePriceSensor(CarburantiMimitEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, config_entry, fuel_type)
         self._attr_unique_id = f"{config_entry.entry_id}_{fuel_type}_{SENSOR_AVERAGE}"
-        self._attr_name = f"{fuel_type} – Prezzo Medio"
-        self._attr_icon = FUEL_ICONS.get(fuel_type, "mdi:gas-station")
+        self._attr_translation_key = SENSOR_AVERAGE
+        self._attr_translation_placeholders = {"fuel_type": fuel_type}
         self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
 
     @property
@@ -171,8 +168,8 @@ class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, config_entry, fuel_type)
         self._attr_unique_id = f"{config_entry.entry_id}_{fuel_type}_{SENSOR_TREND}"
-        self._attr_name = f"{fuel_type} – Tendenza"
-        self._attr_icon = "mdi:trending-up"
+        self._attr_translation_key = SENSOR_TREND
+        self._attr_translation_placeholders = {"fuel_type": fuel_type}
         self._prediction: PredictionResult | None = None
 
     @property
@@ -180,16 +177,6 @@ class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
         if self._prediction is None:
             return None
         return self._prediction.trend_direction
-
-    @property
-    def icon(self) -> str:
-        if self._prediction:
-            direction = self._prediction.trend_direction
-            if direction == "up":
-                return "mdi:trending-up"
-            if direction == "down":
-                return "mdi:trending-down"
-        return "mdi:trending-neutral"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -226,8 +213,8 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
     ) -> None:
         super().__init__(coordinator, config_entry, fuel_type)
         self._attr_unique_id = f"{config_entry.entry_id}_{fuel_type}_{SENSOR_PREDICTION}"
-        self._attr_name = f"{fuel_type} – Previsione"
-        self._attr_icon = "mdi:crystal-ball"
+        self._attr_translation_key = SENSOR_PREDICTION
+        self._attr_translation_placeholders = {"fuel_type": fuel_type}
         self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
         self._prediction: PredictionResult | None = None
         self._ai_analysis: str | None = None
