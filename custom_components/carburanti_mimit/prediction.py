@@ -367,20 +367,21 @@ async def async_ai_prediction(
     api_key: str,
     history: list[DailySnapshot],
     fuel_type: str,
-    prediction: PredictionResult,
+    prediction: PredictionResult | None,
+    current_price: float | None = None,
 ) -> tuple[str | None, str | None]:
     """Call an LLM for a geopolitical and market analysis of the price trend.
 
-    Returns ``(ai_analysis, ai_risk_level)`` or ``(None, None)`` on error.
+    Works from day 1: when *prediction* is ``None`` (insufficient history) the
+    prompt focuses on pure geopolitical/market context for the current price.
+    As history accumulates the prompt is progressively enriched with statistical
+    indicators and the 7-day forecast.
 
-    The AI is asked to:
-    - Analyse market and geopolitical factors driving the observed trend
-    - Consider crude oil markets, OPEC+ decisions, EUR/USD, Italian taxes
-    - Provide a risk level tag: [RISCHIO:basso], [RISCHIO:medio], [RISCHIO:alto]
+    Returns ``(ai_analysis, ai_risk_level)`` or ``(None, None)`` on error.
     """
     from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI  # avoid circular at top
 
-    prompt = _build_geopolitical_prompt(history, fuel_type, prediction)
+    prompt = _build_geopolitical_prompt(history, fuel_type, prediction, current_price)
 
     try:
         if provider == AI_PROVIDER_CLAUDE:
@@ -404,44 +405,64 @@ async def async_ai_prediction(
 def _build_geopolitical_prompt(
     history: list[DailySnapshot],
     fuel_type: str,
-    prediction: PredictionResult,
+    prediction: PredictionResult | None,
+    current_price: float | None = None,
 ) -> str:
-    """Build a rich prompt for geopolitical + market analysis."""
-    history_lines = [
-        f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
-        for s in history[-30:]
-    ]
-    history_text = "\n".join(history_lines)
+    """Build an adaptive prompt for geopolitical + market analysis.
 
-    volatility_text = (
-        f"{prediction.price_volatility:.4f} (coefficiente di variazione)"
-        if prediction.price_volatility is not None else "N/D"
-    )
-    momentum_text = (
-        f"{prediction.price_momentum:+.2f}% (media 7gg vs settimana precedente)"
-        if prediction.price_momentum is not None else "N/D"
-    )
-    acceleration_text = (
-        f"{prediction.price_acceleration:+.6f} EUR/giorno²"
-        if prediction.price_acceleration is not None else "N/D"
-    )
-    weekly_text = (
-        f"{prediction.weekly_change_pct:+.2f}%"
-        if prediction.weekly_change_pct is not None else "N/D"
-    )
-    monthly_text = (
-        f"{prediction.monthly_change_pct:+.2f}%"
-        if prediction.monthly_change_pct is not None else "N/D"
-    )
-
-    seasonal = _seasonal_context()
+    The prompt is enriched progressively:
+    - No history  → pure geopolitical/market context for the current price
+    - Some history → adds observed price trend
+    - Full stats   → adds 7-day forecast, volatility, momentum, acceleration
+    """
     today = date.today().isoformat()
+    seasonal = _seasonal_context()
 
-    return f"""Sei un analista di mercato energetico specializzato nel mercato italiano dei carburanti.
+    # ---- Price / history section ----------------------------------------
+    recent = history[-30:] if history else []
+    if recent:
+        history_lines = [
+            f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
+            for s in recent
+        ]
+        history_text = "\n".join(history_lines)
+        data_days = len([s for s in recent if s.cheapest is not None])
+        price_section = (
+            f"=== DATI STORICI — {fuel_type} (ultimi {data_days} giorni fino al {today}) ===\n"
+            f"{history_text}"
+        )
+    elif current_price is not None:
+        price_section = (
+            f"=== PREZZO CORRENTE — {fuel_type} (rilevato il {today}) ===\n"
+            f"  Prezzo odierno: {current_price:.4f} EUR/L\n"
+            f"  (Storico non ancora disponibile — primo giorno di monitoraggio)"
+        )
+    else:
+        price_section = f"=== CARBURANTE: {fuel_type} — data: {today} ==="
 
-=== DATI STORICI — {fuel_type} (ultimi 30 giorni fino al {today}) ===
-{history_text}
-
+    # ---- Statistical indicators section (only when prediction exists) ----
+    if prediction is not None:
+        volatility_text = (
+            f"{prediction.price_volatility:.4f} (coefficiente di variazione)"
+            if prediction.price_volatility is not None else "N/D"
+        )
+        momentum_text = (
+            f"{prediction.price_momentum:+.2f}% (media 7gg vs settimana precedente)"
+            if prediction.price_momentum is not None else "N/D"
+        )
+        acceleration_text = (
+            f"{prediction.price_acceleration:+.6f} EUR/giorno²"
+            if prediction.price_acceleration is not None else "N/D"
+        )
+        weekly_text = (
+            f"{prediction.weekly_change_pct:+.2f}%"
+            if prediction.weekly_change_pct is not None else "N/D"
+        )
+        monthly_text = (
+            f"{prediction.monthly_change_pct:+.2f}%"
+            if prediction.monthly_change_pct is not None else "N/D"
+        )
+        stats_section = f"""
 === INDICATORI STATISTICI ===
 • Tendenza (modello):     {prediction.trend_direction} ({prediction.trend_pct_7d:+.2f}% in 7 giorni)
 • Confidenza modello:     {prediction.confidence} (metodo: {prediction.method_used})
@@ -450,7 +471,23 @@ def _build_geopolitical_prompt(
 • Accelerazione:          {acceleration_text}
 • Variazione settimanale: {weekly_text}
 • Variazione mensile:     {monthly_text}
-• Previsione domani:      {prediction.predicted_prices[0]:.4f} EUR/L
+• Previsione domani:      {prediction.predicted_prices[0]:.4f} EUR/L"""
+        analysis_note = (
+            "1. Spieghi i fattori di mercato e geopolitici che giustificano la tendenza osservata,"
+        )
+    else:
+        stats_section = (
+            "\n=== INDICATORI STATISTICI ===\n"
+            "  Dati statistici non ancora disponibili (storico in costruzione)."
+        )
+        analysis_note = (
+            "1. Spieghi i fattori di mercato e geopolitici che determinano il livello di prezzo attuale,"
+        )
+
+    return f"""Sei un analista di mercato energetico specializzato nel mercato italiano dei carburanti.
+
+{price_section}
+{stats_section}
 
 === CONTESTO STAGIONALE ===
 {seasonal}
@@ -458,7 +495,7 @@ def _build_geopolitical_prompt(
 === RICHIESTA DI ANALISI ===
 Fornisci un'analisi concisa (3-5 frasi) in italiano che:
 
-1. Spieghi i fattori di mercato e geopolitici che possono giustificare la tendenza osservata,
+{analysis_note}
    considerando in particolare:
    - Andamento del prezzo del petrolio Brent/WTI e decisioni recenti OPEC+
    - Tensioni geopolitiche che impattano le forniture (Russia, Medio Oriente, Nord Africa)

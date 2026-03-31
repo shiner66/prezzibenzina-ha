@@ -232,8 +232,15 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Sensor is unavailable until at least 7 days of history exist."""
-        return self._prediction is not None
+        """Sensor is available as soon as the coordinator has a current price.
+
+        Statistical prediction requires ≥3 days of history; until then
+        native_value is None but AI analysis attributes may already be populated.
+        """
+        if self.coordinator.data is None:
+            return False
+        area = _area(self.coordinator, self._fuel_type)
+        return area is not None and area.cheapest_price is not None
 
     @property
     def native_value(self) -> float | None:
@@ -244,20 +251,22 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        if not self._prediction:
-            return {}
-        return {
-            "predicted_7d": self._prediction.predicted_prices,
-            "confidence": self._prediction.confidence,
-            "method": self._prediction.method_used,
-            "trend_direction": self._prediction.trend_direction,
-            "trend_pct_7d": self._prediction.trend_pct_7d,
-            "price_volatility": self._prediction.price_volatility,
-            "price_momentum": self._prediction.price_momentum,
-            "price_acceleration": self._prediction.price_acceleration,
+        attrs: dict[str, Any] = {
             "ai_analysis": self._ai_analysis,
             "ai_risk_level": self._ai_risk_level,
         }
+        if self._prediction:
+            attrs.update({
+                "predicted_7d": self._prediction.predicted_prices,
+                "confidence": self._prediction.confidence,
+                "method": self._prediction.method_used,
+                "trend_direction": self._prediction.trend_direction,
+                "trend_pct_7d": self._prediction.trend_pct_7d,
+                "price_volatility": self._prediction.price_volatility,
+                "price_momentum": self._prediction.price_momentum,
+                "price_acceleration": self._prediction.price_acceleration,
+            })
+        return attrs
 
     async def async_added_to_hass(self) -> None:
         """Compute prediction from existing history at startup, before first coordinator update."""
@@ -273,13 +282,11 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
 
         ai_provider = self._config_entry.options.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
         ai_key = self._config_entry.options.get(CONF_AI_API_KEY, "")
-        if (
-            self._prediction is not None
-            and ai_provider != AI_PROVIDER_NONE
-            and ai_key
-        ):
+        if ai_provider != AI_PROVIDER_NONE and ai_key:
+            area = _area(self.coordinator, self._fuel_type)
+            current_price = area.cheapest_price if area else None
             self.hass.async_create_task(
-                self._async_fetch_ai_analysis(ai_provider, ai_key, history)
+                self._async_fetch_ai_analysis(ai_provider, ai_key, history, current_price)
             )
 
         super()._handle_coordinator_update()
@@ -289,6 +296,7 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         provider: str,
         api_key: str,
         history: list,
+        current_price: float | None = None,
     ) -> None:
         """Fetch AI geopolitical analysis and trigger a state write."""
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -300,7 +308,8 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
             api_key,
             history,
             self._fuel_type,
-            self._prediction,  # type: ignore[arg-type]
+            self._prediction,
+            current_price=current_price,
         )
         if analysis != self._ai_analysis or risk_level != self._ai_risk_level:
             self._ai_analysis = analysis
