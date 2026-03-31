@@ -75,5 +75,57 @@
         "name": "{fuel_type} – Prediction"
       }
     }
+  },
+  "services": {
+    "force_refresh": {
+      "name": "Refresh now",
+      "description": "Forces an immediate refresh of fuel prices.",
+      "fields": {
+        "entry_id": {
+          "name": "Integration ID",
+          "description": "ID of the config entry to refresh. If omitted, refreshes all Carburanti MIMIT entries."
+        }
+      }
+    },
+    "get_cheapest_near": {
+      "name": "Find cheapest stations near",
+      "description": "Returns the cheapest fuel stations for a given fuel type near an arbitrary location.",
+      "fields": {
+        "latitude": {
+          "name": "Latitude",
+          "description": "Latitude of the search point (WGS-84)."
+        },
+        "longitude": {
+          "name": "Longitude",
+          "description": "Longitude of the search point (WGS-84)."
+        },
+        "fuel_type": {
+          "name": "Fuel type",
+          "description": "The type of fuel to search for."
+        },
+        "radius_km": {
+          "name": "Radius (km)",
+          "description": "Search radius in kilometres (0.5–100)."
+        },
+        "top_n": {
+          "name": "Number of results",
+          "description": "Maximum number of stations to return."
+        }
+      }
+    },
+    "clear_history": {
+      "name": "Clear price history",
+      "description": "Clears the local price history for a config entry.",
+      "fields": {
+        "entry_id": {
+          "name": "Integration ID",
+          "description": "ID of the config entry whose history should be cleared."
+        },
+        "fuel_type": {
+          "name": "Fuel type",
+          "description": "Fuel type to clear (optional; clears all types if omitted)."
+        }
+      }
+    }
   }
 }

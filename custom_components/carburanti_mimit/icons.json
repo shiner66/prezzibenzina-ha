@@ -11,8 +11,7 @@
         "default": "mdi:trending-neutral",
         "state": {
           "up": "mdi:trending-up",
-          "down": "mdi:trending-down",
-          "stable": "mdi:trending-neutral"
+          "down": "mdi:trending-down"
         }
       },
       "prediction": {
