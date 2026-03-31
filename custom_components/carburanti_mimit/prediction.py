@@ -63,7 +63,7 @@ _R2_HIGH_CONFIDENCE = 0.7
 _TREND_DAILY_THRESHOLD = 0.002   # 0.2 % per day → "stable" zone
 _CLAMP_LOW_FACTOR = 0.5
 _CLAMP_HIGH_FACTOR = 2.0
-_MIN_POINTS_LOW = 7
+_MIN_POINTS_LOW = 3
 _MIN_POINTS_MEDIUM = 14
 _MIN_POINTS_HIGH = 30
 _MAX_GAP_INTERPOLATE = 3
@@ -198,15 +198,19 @@ def _extract_prices(history: list[DailySnapshot]) -> list[float]:
             while j < len(prices) and prices[j] is None:
                 j += 1
             gap_len = j - i
-            if gap_len <= _MAX_GAP_INTERPOLATE and i > 0 and j < len(prices):
+            if i == 0:
+                # Leading None values — skip them, can't interpolate without a prior price
+                prices = prices[j:]
+                i = 0
+            elif gap_len <= _MAX_GAP_INTERPOLATE and j < len(prices):
                 p_start = prices[i - 1]
                 p_end = prices[j]
                 for k in range(gap_len):
                     prices[i + k] = p_start + (p_end - p_start) * (k + 1) / (gap_len + 1)
+                i = j
             else:
                 prices = prices[:i]
                 break
-            i = j
         else:
             i += 1
 

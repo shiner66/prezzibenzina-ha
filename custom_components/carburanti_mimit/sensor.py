@@ -191,6 +191,13 @@ class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
             "price_acceleration": self._prediction.price_acceleration,
         }
 
+    async def async_added_to_hass(self) -> None:
+        """Compute prediction from existing history at startup, before first coordinator update."""
+        await super().async_added_to_hass()
+        if self._prediction is None:
+            history = self.coordinator._storage.get_history(self._fuel_type, days=30)
+            self._prediction = compute_prediction(history, self._fuel_type)
+
     def _handle_coordinator_update(self) -> None:
         """Recompute prediction on coordinator data refresh."""
         history = self.coordinator._storage.get_history(self._fuel_type, days=30)
@@ -251,6 +258,13 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
             "ai_analysis": self._ai_analysis,
             "ai_risk_level": self._ai_risk_level,
         }
+
+    async def async_added_to_hass(self) -> None:
+        """Compute prediction from existing history at startup, before first coordinator update."""
+        await super().async_added_to_hass()
+        if self._prediction is None:
+            history = self.coordinator._storage.get_history(self._fuel_type, days=30)
+            self._prediction = compute_prediction(history, self._fuel_type)
 
     def _handle_coordinator_update(self) -> None:
         """Recompute prediction and optionally call AI on coordinator refresh."""
