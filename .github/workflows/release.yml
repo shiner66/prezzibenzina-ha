@@ -1,19 +1,28 @@
 name: Release
 
-# Triggers on any tag push matching vX.Y.Z or vX.Y.Z-<pre-release>
-# Examples:
+# Triggers either on a tag push (vX.Y.Z / vX.Y.Z-suffix)
+# or manually from the Actions UI (workflow_dispatch).
+#
+# Manual dispatch: Actions → Release → Run workflow → enter version
+#   e.g. "1.0.0" for stable, "1.0.1-beta.1" for pre-release
+#
+# Tag push examples:
 #   v1.0.0          → stable release  (latest)
 #   v1.0.1-beta.1   → pre-release
-#   v1.1.0-rc.2     → pre-release
-#   v2.0.0-alpha.1  → pre-release
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"          # stable:     v1.0.0
-      - "v[0-9]+.[0-9]+.[0-9]+-*"        # pre-release: v1.0.0-beta.1, v1.0.0-rc.1, etc.
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.0.0 or 1.0.1-beta.1) — without leading v"
+        required: true
+        type: string
 
 permissions:
-  contents: write   # needed to create GitHub releases and upload assets
+  contents: write   # needed to create GitHub releases, tags, and upload assets
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
@@ -66,14 +75,19 @@ jobs:
         uses: actions/checkout@v4
 
       # ── Version detection ──────────────────────────────────────────────
-      - name: Extract version from tag
+      - name: Extract version from tag or input
         id: version
         run: |
-          RAW_TAG="${GITHUB_REF_NAME}"          # e.g. v1.0.1-beta.1
-          VERSION="${RAW_TAG#v}"                # strip leading 'v' → 1.0.1-beta.1
+          # Determine source: tag push or workflow_dispatch input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            RAW_TAG="v${VERSION}"
+          else
+            RAW_TAG="${GITHUB_REF_NAME}"          # e.g. v1.0.1-beta.1
+            VERSION="${RAW_TAG#v}"                # strip leading 'v'
+          fi
 
-          # Detect pre-release: tag contains a hyphen after the semver core
-          # Matches: -alpha, -beta, -rc, -dev, or any custom suffix
+          # Detect pre-release: version contains a hyphen after the semver core
           if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-.+'; then
             IS_PRERELEASE=true
             RELEASE_TYPE="pre-release"
@@ -82,14 +96,25 @@ jobs:
             RELEASE_TYPE="release"
           fi
 
-          echo "tag=$RAW_TAG"             >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION"         >> "$GITHUB_OUTPUT"
-          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
-          echo "release_type=$RELEASE_TYPE"   >> "$GITHUB_OUTPUT"
+          echo "tag=$RAW_TAG"                    >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"                >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE"    >> "$GITHUB_OUTPUT"
+          echo "release_type=$RELEASE_TYPE"      >> "$GITHUB_OUTPUT"
 
+          echo "Trigger    : ${{ github.event_name }}"
           echo "Tag        : $RAW_TAG"
           echo "Version    : $VERSION"
           echo "Pre-release: $IS_PRERELEASE"
+
+      # ── Create git tag (only for workflow_dispatch — tag pushes already have one) ──
+      - name: Create and push git tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
 
       # ── Update manifest.json version ──────────────────────────────────
       - name: Bump version in manifest.json
