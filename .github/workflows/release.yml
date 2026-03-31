@@ -1,13 +1,16 @@
 name: Release
 
 # Triggers:
-#   push to main        → auto beta pre-release  (vX.Y.Z-beta.<run_number>)
-#   tag push vX.Y.Z     → stable release (marked as latest)
-#   tag push vX.Y.Z-*   → pre-release
-#   workflow_dispatch   → manual release (Actions UI)
+#   push to any non-main branch   → beta pre-release for that branch
+#                                    (old beta for the same branch is deleted first)
+#   tag push  vX.Y.Z              → stable release (kept forever, marked as latest)
+#   tag push  vX.Y.Z-*            → explicit pre-release (kept forever)
+#   workflow_dispatch             → manual stable/pre-release from Actions UI
+#
+# Push to main → no automatic release (use a tag or workflow_dispatch).
 on:
   push:
-    branches:
+    branches-ignore:
       - main
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
@@ -20,7 +23,7 @@ on:
         type: string
 
 permissions:
-  contents: write   # create releases, tags, push manifest bump commit
+  contents: write
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
@@ -38,9 +41,6 @@ jobs:
 
       - name: Run HACS validation
         uses: hacs/action@main
-        # continue-on-error: topics/description are GitHub repo settings (UI),
-        # not code issues. HACS also requires at least one published release,
-        # so the first run will fail here — that is expected.
         continue-on-error: true
         with:
           category: integration
@@ -75,80 +75,108 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Full history needed so we can commit the manifest bump
           fetch-depth: 0
 
-      # ── Version detection ──────────────────────────────────────────────
-      - name: Extract version from tag, input, or branch push
+      # ── Version & release-type detection ──────────────────────────────
+      - name: Determine version and release type
         id: version
         run: |
           EVENT="${{ github.event_name }}"
           REF="${GITHUB_REF}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          BASE_VERSION=$(python -c "import json; print(json.load(open('custom_components/carburanti_mimit/manifest.json'))['version'])")
 
           if [ "$EVENT" = "push" ] && [[ "$REF" == refs/heads/* ]]; then
-            # Branch push → auto beta: read base version from manifest.json
-            BASE_VERSION=$(python -c "import json; print(json.load(open('custom_components/carburanti_mimit/manifest.json'))['version'])")
-            VERSION="${BASE_VERSION}-beta.${{ github.run_number }}"
-            RAW_TAG="v${VERSION}"
+            # ── Beta from branch push ──────────────────────────────────
+            BRANCH="${GITHUB_REF_NAME}"
+            # Sanitize: replace every / and non-alphanumeric char with -
+            BRANCH_SLUG=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//')
+            TAG="beta-${BRANCH_SLUG}"
+            VERSION="${BASE_VERSION}-beta.${SHORT_SHA}"
             IS_PRERELEASE=true
-            AUTO_BETA=true
+            IS_BETA=true
 
           elif [ "$EVENT" = "workflow_dispatch" ]; then
+            # ── Manual stable/pre-release ──────────────────────────────
             VERSION="${{ github.event.inputs.version }}"
-            RAW_TAG="v${VERSION}"
-            AUTO_BETA=false
+            TAG="v${VERSION}"
+            IS_BETA=false
+            if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-.+'; then
+              IS_PRERELEASE=true
+            else
+              IS_PRERELEASE=false
+            fi
 
           else
-            # Tag push: refs/tags/v1.0.0 → v1.0.0
-            RAW_TAG="${GITHUB_REF_NAME}"
-            VERSION="${RAW_TAG#v}"
-            AUTO_BETA=false
+            # ── Tag push ───────────────────────────────────────────────
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+            IS_BETA=false
+            if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-.+'; then
+              IS_PRERELEASE=true
+            else
+              IS_PRERELEASE=false
+            fi
           fi
 
-          # Detect pre-release: version contains a hyphen after the semver core
-          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-.+'; then
-            IS_PRERELEASE=true
-            RELEASE_TYPE="pre-release"
-          else
-            IS_PRERELEASE=false
-            RELEASE_TYPE="release"
-          fi
-
-          echo "tag=$RAW_TAG"                    >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"                        >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"                >> "$GITHUB_OUTPUT"
           echo "is_prerelease=$IS_PRERELEASE"    >> "$GITHUB_OUTPUT"
-          echo "release_type=$RELEASE_TYPE"      >> "$GITHUB_OUTPUT"
-          echo "auto_beta=$AUTO_BETA"            >> "$GITHUB_OUTPUT"
+          echo "is_beta=$IS_BETA"                >> "$GITHUB_OUTPUT"
 
           echo "Trigger    : $EVENT"
-          echo "Tag        : $RAW_TAG"
+          echo "Tag        : $TAG"
           echo "Version    : $VERSION"
           echo "Pre-release: $IS_PRERELEASE"
-          echo "Auto beta  : $AUTO_BETA"
+          echo "Beta       : $IS_BETA"
 
-      # ── Create git tag (needed for branch pushes and workflow_dispatch) ──
-      - name: Create and push git tag
-        if: steps.version.outputs.auto_beta == 'true' || github.event_name == 'workflow_dispatch'
+      # ── Beta only: delete old release + tag for this branch ───────────
+      - name: Delete existing beta release and tag
+        if: steps.version.outputs.is_beta == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          gh release delete "$TAG" --yes --repo "${{ github.repository }}" 2>/dev/null \
+            && echo "Deleted GitHub release: $TAG" \
+            || echo "No existing GitHub release for $TAG — skipping"
+
+          git push origin ":refs/tags/$TAG" 2>/dev/null \
+            && echo "Deleted remote tag: $TAG" \
+            || echo "No remote tag $TAG — skipping"
+
+      # ── Beta only: create new tag on HEAD ─────────────────────────────
+      - name: Create beta tag
+        if: steps.version.outputs.is_beta == 'true'
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Beta release ${{ steps.version.outputs.version }}"
+          git push origin "$TAG"
 
-          # Fail gracefully if tag already exists
+      # ── Stable only: create tag for workflow_dispatch ─────────────────
+      - name: Create stable tag (workflow_dispatch)
+        if: steps.version.outputs.is_beta != 'true' && github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           if git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
-            echo "Tag $TAG already exists — skipping tag creation"
+            echo "Tag $TAG already exists — skipping"
           else
             git tag -a "$TAG" -m "Release $TAG"
             git push origin "$TAG"
           fi
 
-      # ── Update manifest.json version and commit it (stable releases only) ─
+      # ── Stable only: bump manifest.json and commit back to main ───────
       - name: Bump version in manifest.json
-        if: steps.version.outputs.auto_beta != 'true'
+        if: steps.version.outputs.is_beta != 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           MANIFEST="custom_components/carburanti_mimit/manifest.json"
-
           python - <<EOF
           import json, pathlib
           p = pathlib.Path("$MANIFEST")
@@ -159,12 +187,11 @@ jobs:
           EOF
 
       - name: Commit manifest version bump
-        if: steps.version.outputs.auto_beta != 'true'
+        if: steps.version.outputs.is_beta != 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add custom_components/carburanti_mimit/manifest.json
           if git diff --cached --quiet; then
             echo "manifest.json already at version $VERSION — no commit needed"
@@ -173,16 +200,14 @@ jobs:
             git push origin HEAD:main
           fi
 
-      # ── Build ZIP for HACS ─────────────────────────────────────────────
+      # ── Build ZIP for HACS ────────────────────────────────────────────
       - name: Create release archive
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           ZIPFILE="carburanti_mimit-${VERSION}.zip"
-
           cd custom_components
           zip -r "../${ZIPFILE}" carburanti_mimit/
           cd ..
-
           echo "Created: $ZIPFILE ($(du -sh "$ZIPFILE" | cut -f1))"
           echo "zipfile=$ZIPFILE" >> "$GITHUB_ENV"
 
@@ -191,10 +216,14 @@ jobs:
         id: notes
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          IS_BETA="${{ steps.version.outputs.is_beta }}"
           IS_PRERELEASE="${{ steps.version.outputs.is_prerelease }}"
+          BRANCH="${GITHUB_REF_NAME}"
 
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            BADGE="⚠️ **Pre-release** — potrebbe contenere modifiche sperimentali. Non usare in produzione senza aver testato."
+          if [ "$IS_BETA" = "true" ]; then
+            BADGE="🔧 **Beta automatica** dal branch \`${BRANCH}\`. Non usare in produzione."
+          elif [ "$IS_PRERELEASE" = "true" ]; then
+            BADGE="⚠️ **Pre-release** — potrebbe contenere modifiche sperimentali."
           else
             BADGE="✅ **Release stabile**"
           fi
