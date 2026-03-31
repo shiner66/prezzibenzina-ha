@@ -1,16 +1,14 @@
 name: Release
 
-# Triggers on a version tag push (vX.Y.Z or vX.Y.Z-suffix)
-# or manually from the Actions UI.
-#
-# Tag push examples:
-#   v1.0.0          → stable release (marked as latest)
-#   v1.0.1-beta.1   → pre-release
-#
-# Manual dispatch: Actions → Release → Run workflow → enter version
-#   e.g. "1.0.0" for stable, "1.0.1-beta.1" for pre-release
+# Triggers:
+#   push to main        → auto beta pre-release  (vX.Y.Z-beta.<run_number>)
+#   tag push vX.Y.Z     → stable release (marked as latest)
+#   tag push vX.Y.Z-*   → pre-release
+#   workflow_dispatch   → manual release (Actions UI)
 on:
   push:
+    branches:
+      - main
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
@@ -81,16 +79,30 @@ jobs:
           fetch-depth: 0
 
       # ── Version detection ──────────────────────────────────────────────
-      - name: Extract version from tag or input
+      - name: Extract version from tag, input, or branch push
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          EVENT="${{ github.event_name }}"
+          REF="${GITHUB_REF}"
+
+          if [ "$EVENT" = "push" ] && [[ "$REF" == refs/heads/* ]]; then
+            # Branch push → auto beta: read base version from manifest.json
+            BASE_VERSION=$(python -c "import json; print(json.load(open('custom_components/carburanti_mimit/manifest.json'))['version'])")
+            VERSION="${BASE_VERSION}-beta.${{ github.run_number }}"
+            RAW_TAG="v${VERSION}"
+            IS_PRERELEASE=true
+            AUTO_BETA=true
+
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
             RAW_TAG="v${VERSION}"
+            AUTO_BETA=false
+
           else
             # Tag push: refs/tags/v1.0.0 → v1.0.0
             RAW_TAG="${GITHUB_REF_NAME}"
             VERSION="${RAW_TAG#v}"
+            AUTO_BETA=false
           fi
 
           # Detect pre-release: version contains a hyphen after the semver core
@@ -106,15 +118,17 @@ jobs:
           echo "version=$VERSION"                >> "$GITHUB_OUTPUT"
           echo "is_prerelease=$IS_PRERELEASE"    >> "$GITHUB_OUTPUT"
           echo "release_type=$RELEASE_TYPE"      >> "$GITHUB_OUTPUT"
+          echo "auto_beta=$AUTO_BETA"            >> "$GITHUB_OUTPUT"
 
-          echo "Trigger    : ${{ github.event_name }}"
+          echo "Trigger    : $EVENT"
           echo "Tag        : $RAW_TAG"
           echo "Version    : $VERSION"
           echo "Pre-release: $IS_PRERELEASE"
+          echo "Auto beta  : $AUTO_BETA"
 
-      # ── Create git tag for workflow_dispatch (tag pushes already have one) ──
+      # ── Create git tag (needed for branch pushes and workflow_dispatch) ──
       - name: Create and push git tag
-        if: github.event_name == 'workflow_dispatch'
+        if: steps.version.outputs.auto_beta == 'true' || github.event_name == 'workflow_dispatch'
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           git config user.name  "github-actions[bot]"
@@ -128,8 +142,9 @@ jobs:
             git push origin "$TAG"
           fi
 
-      # ── Update manifest.json version and commit it ─────────────────────
+      # ── Update manifest.json version and commit it (stable releases only) ─
       - name: Bump version in manifest.json
+        if: steps.version.outputs.auto_beta != 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           MANIFEST="custom_components/carburanti_mimit/manifest.json"
@@ -144,6 +159,7 @@ jobs:
           EOF
 
       - name: Commit manifest version bump
+        if: steps.version.outputs.auto_beta != 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name  "github-actions[bot]"
