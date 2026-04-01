@@ -9,7 +9,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -527,8 +527,9 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             async_dispatcher_connect(self.hass, signal, self._on_ai_update)
         )
 
-    async def _on_ai_update(self) -> None:
-        """Handle AI results arriving from PricePredictionSensor."""
+    @callback
+    def _on_ai_update(self) -> None:
+        """Handle AI results arriving from PricePredictionSensor (sync callback for dispatcher)."""
         ai_data = self.coordinator.ai_cache.get(self._fuel_type, {})
         self._ai_analysis = ai_data.get("analysis")
         self._ai_risk_level = ai_data.get("risk_level")

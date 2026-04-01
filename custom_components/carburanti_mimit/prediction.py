@@ -436,15 +436,20 @@ async def async_ai_prediction(
             return None, None, None, None
 
         if not text:
+            _LOGGER.warning("AI call returned empty response")
             return None, None, None, None
 
         risk = _parse_risk_level(text)
         price_3d = _parse_price_3d(text)
         brief = _parse_brief(text)
+        _LOGGER.debug(
+            "AI response parsed — risk=%s price_3d=%s brief=%s",
+            risk, price_3d, brief,
+        )
         return text.strip(), risk, price_3d, brief
 
     except Exception as exc:  # noqa: BLE001
-        _LOGGER.debug("AI prediction call failed (%s) — skipping", exc)
+        _LOGGER.warning("AI prediction call failed (%s: %s) — skipping", type(exc).__name__, exc)
     return None, None, None, None
 
 
