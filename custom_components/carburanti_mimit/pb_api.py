@@ -94,61 +94,101 @@ class PrezzibenzinaClient:
         session_key = await self._ensure_session()
         base = self._build_session_params(session_key)
 
-        # ------------------------------------------------------------------
-        # Strategia 1: pb_get_stations_from_polyline
-        # L'app usa questo endpoint per "StationsViewModel.getStationsInArea".
-        # Codifica il bounding box come Google Encoded Polyline (formato nativo
-        # dell'SDK Android) e lo passa come param "polyline".
-        # ------------------------------------------------------------------
-        polyline = _encode_bounding_box(lat, lon, radius_km)
-        poly_params = {**base, "polyline": polyline}
-        _LOGGER.debug(
-            "PrezzibenzinaClient → pb_get_stations_from_polyline polyline=%s session=%s",
-            polyline, "yes" if session_key else "no",
-        )
-        raw = await self._try_get(PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE, poly_params)
-        if raw is None:
-            raw = await self._try_post_form(PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE, poly_params)
+        # Usiamo un raggio allargato per il fetch PB in modo da coprire aree con
+        # scarsa densità di segnalazioni; il filtro finale usa il raggio reale.
+        fetch_radius = max(radius_km, 50.0)
 
-        if raw is not None:
-            _LOGGER.debug(
-                "PrezzibenzinaClient pb_get_stations_from_polyline risposta (primi 1000): %s",
-                str(raw)[:1000],
+        # ------------------------------------------------------------------
+        # Strategia 1a: pb_get_stations_from_polyline — Google Encoded Polyline
+        # ------------------------------------------------------------------
+        poly_encoded = _encode_bounding_box(lat, lon, fetch_radius)
+        _LOGGER.debug(
+            "PrezzibenzinaClient → pb_get_stations_from_polyline (encoded) polyline=%s",
+            poly_encoded,
+        )
+        raw = await self._try_get(
+            PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE,
+            {**base, "polyline": poly_encoded},
+        )
+        if raw is None:
+            raw = await self._try_post_form(
+                PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE,
+                {**base, "polyline": poly_encoded},
             )
-            nearby = self._filter_nearby(self._parse_station_list(raw), lat, lon, radius_km)
+
+        # ------------------------------------------------------------------
+        # Strategia 1b: pb_get_stations_from_polyline — coordinate plaintext
+        # Alcune implementazioni usano una lista piatta di lat,lng senza encoding.
+        # ------------------------------------------------------------------
+        if raw is None:
+            dlat, dlon = _bounding_box_deltas(lat, lon, fetch_radius)
+            sw = (lat - dlat, lon - dlon)
+            ne = (lat + dlat, lon + dlon)
+            poly_plain = f"{sw[0]:.5f},{sw[1]:.5f},{ne[0]:.5f},{ne[1]:.5f}"
             _LOGGER.debug(
-                "pb_get_stations_from_polyline: %d stazioni nel raggio %.0f km",
-                len(nearby), radius_km,
+                "PrezzibenzinaClient → pb_get_stations_from_polyline (plain) polyline=%s",
+                poly_plain,
             )
-            if nearby:
-                return await self._fetch_prices_for_stations(
-                    nearby, [s["id"] for s in nearby], session_key
+            raw = await self._try_get(
+                PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE,
+                {**base, "polyline": poly_plain},
+            )
+            if raw is None:
+                raw = await self._try_post_form(
+                    PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE,
+                    {**base, "polyline": poly_plain},
                 )
 
         # ------------------------------------------------------------------
-        # Strategia 2: pb_get_stations con lat/lng (fallback)
-        # L'API sembra ignorare le coordinate ma potrebbe cambiare in futuro;
-        # il filtro client-side è comunque applicato.
+        # Strategia 2: pb_get_stations_on_polyline — segmento SW→NE
+        # Usato dall'app per stazioni lungo un percorso; una linea diagonale
+        # che attraversa il bounding box può funzionare come area search.
         # ------------------------------------------------------------------
-        params = self._build_params(lat, lon, radius_km, session_key)
-        _LOGGER.debug(
-            "PrezzibenzinaClient → pb_get_stations (fallback) lat=%s lng=%s distance=%s",
-            params["lat"], params["lng"], params["distance"],
-        )
-        raw = await self._try_get(PB_ENDPOINT_GET_STATIONS, params)
         if raw is None:
-            raw = await self._try_post_form(PB_ENDPOINT_GET_STATIONS, params)
+            dlat, dlon = _bounding_box_deltas(lat, lon, fetch_radius)
+            segment = _google_encode_polyline([
+                (lat - dlat, lon - dlon),
+                (lat + dlat, lon + dlon),
+            ])
+            _LOGGER.debug(
+                "PrezzibenzinaClient → pb_get_stations_on_polyline segment=%s", segment
+            )
+            raw = await self._try_get(
+                "pb_get_stations_on_polyline",
+                {**base, "polyline": segment},
+            )
+            if raw is None:
+                raw = await self._try_post_form(
+                    "pb_get_stations_on_polyline",
+                    {**base, "polyline": segment},
+                )
+
+        # ------------------------------------------------------------------
+        # Strategia 3: pb_get_stations con lat/lng (fallback finale)
+        # L'API ignora le coordinate ma il filtro client-side scarta le lontane.
+        # ------------------------------------------------------------------
+        if raw is None:
+            params = self._build_params(lat, lon, fetch_radius, session_key)
+            _LOGGER.debug(
+                "PrezzibenzinaClient → pb_get_stations (fallback) lat=%s lng=%s",
+                params["lat"], params["lng"],
+            )
+            raw = await self._try_get(PB_ENDPOINT_GET_STATIONS, params)
+            if raw is None:
+                raw = await self._try_post_form(PB_ENDPOINT_GET_STATIONS, params)
+
         if raw is None:
             return []
 
         _LOGGER.debug(
-            "PrezzibenzinaClient pb_get_stations risposta (primi 800 car): %s",
-            str(raw)[:800],
+            "PrezzibenzinaClient risposta stazioni (primi 800 car): %s", str(raw)[:800]
         )
+
+        # Filtra per raggio reale (non fetch_radius) e recupera prezzi
         nearby = self._filter_nearby(self._parse_station_list(raw), lat, lon, radius_km)
         _LOGGER.debug(
-            "pb_get_stations fallback: %d stazioni nel raggio %.0f km",
-            len(nearby), radius_km,
+            "PrezzibenzinaClient: %d stazioni nel raggio %.0f km (fetch allargato a %.0f km)",
+            len(nearby), radius_km, fetch_radius,
         )
         if not nearby:
             return []
@@ -510,19 +550,21 @@ class PrezzibenzinaClient:
 # ------------------------------------------------------------------
 
 
+def _bounding_box_deltas(lat: float, lon: float, radius_km: float) -> tuple[float, float]:
+    """Restituisce (delta_lat, delta_lon) in gradi per un raggio in km."""
+    import math
+    dlat = radius_km / 111.32
+    dlon = radius_km / (111.32 * math.cos(math.radians(lat)))
+    return dlat, dlon
+
+
 def _encode_bounding_box(lat: float, lon: float, radius_km: float) -> str:
     """Codifica un bounding box attorno a (lat, lon) come Google Encoded Polyline.
 
     Il rettangolo è rappresentato da 5 vertici (il primo si ripete per chiuderlo):
       SW → NW → NE → SE → SW
-
-    Questo è il formato prodotto dall'SDK Android di Google Maps e verosimilmente
-    atteso dall'endpoint pb_get_stations_from_polyline.
     """
-    import math
-
-    dlat = radius_km / 111.32
-    dlon = radius_km / (111.32 * math.cos(math.radians(lat)))
+    dlat, dlon = _bounding_box_deltas(lat, lon, radius_km)
     sw = (lat - dlat, lon - dlon)
     nw = (lat + dlat, lon - dlon)
     ne = (lat + dlat, lon + dlon)
