@@ -442,10 +442,13 @@ async def async_ai_prediction(
         risk = _parse_risk_level(text)
         price_3d = _parse_price_3d(text)
         brief = _parse_brief(text)
-        _LOGGER.debug(
-            "AI response parsed — risk=%s price_3d=%s brief=%s",
-            risk, price_3d, brief,
-        )
+        if brief is None:
+            _LOGGER.warning(
+                "AI response missing [SINTESI:] tag — response preview: %.300s",
+                text,
+            )
+        else:
+            _LOGGER.debug("AI parsed — risk=%s price_3d=%s brief=%s", risk, price_3d, brief)
         return text.strip(), risk, price_3d, brief
 
     except Exception as exc:  # noqa: BLE001
@@ -645,10 +648,28 @@ def _parse_price_3d(text: str) -> float | None:
 
 
 def _parse_brief(text: str) -> str | None:
-    """Extract the one-line AI summary from the [SINTESI:...] tag."""
+    """Extract the one-line AI summary.
+
+    First tries the structured [SINTESI:...] tag. Falls back to extracting the
+    first non-empty sentence that follows the **SINTESI**: section header, in
+    case the model outputs the section text but omits the tag markers.
+    """
+    # Primary: tag-based extraction
     match = _SINTESI_PATTERN.search(text)
     if match:
         return match.group(1).strip()
+
+    # Fallback: look for the SINTESI section and grab the first meaningful line
+    sintesi_section = re.search(
+        r"\*\*SINTESI\*\*[:\s]*\n(.+?)(?:\n|$)", text, re.IGNORECASE
+    )
+    if sintesi_section:
+        candidate = sintesi_section.group(1).strip()
+        # Strip any residual markdown or bracket artifacts and limit length
+        candidate = re.sub(r"[\[\]`*_]", "", candidate).strip()
+        if candidate:
+            return candidate[:150]
+
     return None
 
 

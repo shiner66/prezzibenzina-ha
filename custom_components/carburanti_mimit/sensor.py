@@ -496,7 +496,12 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        return self._ai_brief
+        if self._ai_brief:
+            return self._ai_brief
+        # Fallback: if analysis arrived but brief tag was missing, show risk level
+        if self._ai_analysis and self._ai_risk_level:
+            return f"Rischio {self._ai_risk_level}"
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
