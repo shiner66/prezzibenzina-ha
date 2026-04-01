@@ -326,6 +326,13 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         # rather than waiting for the next scheduled coordinator update.
         ai_provider = self._config_entry.options.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
         ai_key = self._config_entry.options.get(CONF_AI_API_KEY, "")
+        _LOGGER.error(
+            "DIAG async_added_to_hass %s — provider=%r key_set=%s ai_analysis_none=%s",
+            self._fuel_type,
+            ai_provider,
+            bool(ai_key),
+            self._ai_analysis is None,
+        )
         if ai_provider != AI_PROVIDER_NONE and ai_key and self._ai_analysis is None:
             area = _area(self.coordinator, self._fuel_type)
             self.hass.async_create_task(
@@ -379,8 +386,8 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             current_price=current_price,
             national_average=national_average,
         )
-        _LOGGER.warning(
-            "AI fetch done for %s — analysis=%s risk=%s brief=%s peer=%s",
+        _LOGGER.error(
+            "DIAG AI fetch done for %s — analysis=%s risk=%s brief=%s peer=%s",
             self._fuel_type,
             "yes" if analysis else "None",
             risk_level,
@@ -559,8 +566,8 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         confidence: str | None,
     ) -> None:
         """Called directly by PricePredictionSensor after a successful AI fetch."""
-        _LOGGER.warning(
-            "update_from_ai called for %s — brief=%s risk=%s",
+        _LOGGER.error(
+            "DIAG update_from_ai called for %s — brief=%s risk=%s",
             self._fuel_type, brief, risk_level,
         )
         self._ai_analysis = analysis
