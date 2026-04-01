@@ -125,3 +125,54 @@ REGISTRY_CACHE_DAYS = 7
 # ---------------------------------------------------------------------------
 HTTP_TIMEOUT_SECONDS = 30
 HTTP_TIMEOUT_VALIDATION = 10
+
+# ---------------------------------------------------------------------------
+# PrezzibenzinaIT API (reverse-engineered from Android APK, unofficial)
+# ---------------------------------------------------------------------------
+PB_API_BASE = "https://api3.prezzibenzina.it/"
+
+# Endpoint names recovered from dex symbols
+PB_ENDPOINT_GET_STATIONS = "pb_get_stations"
+PB_ENDPOINT_GET_PRICES = "pb_get_prices"
+PB_ENDPOINT_GET_SESSION_KEY = "pb_get_session_key"
+PB_ENDPOINT_CREATE_SESSION = "pb_create_session"
+PB_ENDPOINT_CHECK_SESSION = "pb_check_session"
+
+# Fake Android client metadata (sent as query/form params)
+PB_PLATFORM = "android"
+PB_APP_VERSION = "5.0.0"
+PB_SDK = "33"
+
+# Session TTL — re-create anonymous session after this many hours
+PB_SESSION_TTL_HOURS = 6
+
+# Intraday refresh times (hour, minute) in Europe/Rome for PB spot-checks
+# These supplement the existing 14:30 ospzApi check.
+PB_INTRADAY_SLOTS: list[tuple[int, int]] = [(10, 30), (13, 30)]
+
+# Maximum distance (km) to match a PB station to a MIMIT station
+PB_MATCH_RADIUS_KM = 0.2
+
+# Fuel name mapping: lower-cased PB fuel name → MIMIT descCarburante
+PB_FUEL_TO_MIMIT: dict[str, str] = {
+    # Benzina / unleaded
+    "benzina": FUEL_TYPE_BENZINA,
+    "gasoline": FUEL_TYPE_BENZINA,
+    "sp95": FUEL_TYPE_BENZINA,
+    "sp98": FUEL_TYPE_BENZINA,
+    "unleaded": FUEL_TYPE_BENZINA,
+    # Gasolio / diesel
+    "gasolio": FUEL_TYPE_GASOLIO,
+    "diesel": FUEL_TYPE_GASOLIO,
+    "go": FUEL_TYPE_GASOLIO,
+    # GPL / LPG
+    "gpl": FUEL_TYPE_GPL,
+    "lpg": FUEL_TYPE_GPL,
+    # Metano / CNG
+    "metano": FUEL_TYPE_METANO,
+    "methane": FUEL_TYPE_METANO,
+    "cng": FUEL_TYPE_METANO,
+    "gnc": FUEL_TYPE_METANO,
+    # HVO
+    "hvo": FUEL_TYPE_HVO,
+}

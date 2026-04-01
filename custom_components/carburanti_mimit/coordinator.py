@@ -35,9 +35,12 @@ from .const import (
     MIMIT_INTRADAY_MINUTE,
     MIMIT_UPDATE_HOUR,
     MIMIT_UPDATE_MINUTE,
+    PB_INTRADAY_SLOTS,
+    PB_MATCH_RADIUS_KM,
     REGISTRY_CACHE_DAYS,
 )
-from .geo import filter_by_radius
+from .geo import filter_by_radius, haversine_km
+from .pb_api import PrezzibenzinaClient
 from .parser import (
     EnrichedStation,
     Station,
@@ -77,7 +80,7 @@ class CoordinatorData:
     by_fuel: dict[str, FuelAreaData]
     last_updated: datetime
     station_count_in_radius: int
-    data_source: str = "csv_morning"  # "csv_morning" | "ospzapi_intraday"
+    data_source: str = "csv_morning"  # "csv_morning" | "ospzapi_intraday" | "prezzibenzina_intraday"
     national_averages: dict[str, float] = field(default_factory=dict)
 
 
@@ -90,6 +93,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         config_entry: ConfigEntry,
         client: MimitApiClient,
         storage: HistoryStorage,
+        pb_client: PrezzibenzinaClient | None = None,
     ) -> None:
         interval_h = config_entry.options.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H)
         super().__init__(
@@ -99,6 +103,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             update_interval=timedelta(hours=interval_h),
         )
         self._client = client
+        self._pb_client = pb_client
         self._storage = storage
         self._config_entry = config_entry
 
@@ -106,10 +111,16 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._registry_cache: dict[int, Station] | None = None
         self._registry_fetched_at: datetime | None = None
 
+        # Full list of enriched stations inside the radius — kept between
+        # updates so PB intraday overlays can re-use them without re-fetching.
+        self._enriched_cache: list[EnrichedStation] | None = None
+
         # Schedule daily refresh at MIMIT publish time (08:15 Europe/Rome)
         self._unsub_daily: Callable[[], None] | None = None
         # Schedule intraday spot-check via ospzApi (14:30 Europe/Rome)
         self._unsub_intraday: Callable[[], None] | None = None
+        # PrezzibenzinaIT intraday spot-check unsubs (one per slot)
+        self._unsub_pb: list[Callable[[], None]] = []
         # Shared AI results cache: fuel_type → {analysis, risk_level, price_3d, brief, price_tomorrow, confidence}
         self.ai_cache: dict[str, dict] = {}
 
@@ -187,6 +198,49 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsub_intraday()
             self._unsub_intraday = None
 
+    def schedule_pb_intraday_refreshes(self) -> None:
+        """Register time triggers for PrezzibenzinaIT spot-checks.
+
+        Two daily slots are scheduled (see PB_INTRADAY_SLOTS in const.py).
+        Each slot independently re-schedules itself for the next day after
+        firing so that cancelling one slot does not affect the others.
+        If no PB client is available the method is a no-op.
+        """
+        if self._pb_client is None:
+            return
+        self.cancel_pb_intraday_refreshes()
+        for hour, minute in PB_INTRADAY_SLOTS:
+            self._schedule_pb_slot(hour, minute)
+
+    def _schedule_pb_slot(self, hour: int, minute: int) -> None:
+        """Register a single PB time trigger for *hour*:*minute* Rome time."""
+        tz = dt_util.get_time_zone("Europe/Rome")
+        target = datetime.now(tz).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+
+        @callback
+        def _on_pb_time(_now: datetime) -> None:
+            _LOGGER.debug(
+                "PrezzibenzinaIT spot-check triggered at %02d:%02d Europe/Rome",
+                hour,
+                minute,
+            )
+            self.hass.async_create_task(self._async_pb_intraday_update())
+            # Re-schedule this slot for tomorrow
+            self._schedule_pb_slot(hour, minute)
+
+        unsub = ha_event.async_track_point_in_time(
+            self.hass, _on_pb_time, target + timedelta(days=1)
+        )
+        self._unsub_pb.append(unsub)
+
+    def cancel_pb_intraday_refreshes(self) -> None:
+        """Unsubscribe from all PrezzibenzinaIT time triggers."""
+        for unsub in self._unsub_pb:
+            unsub()
+        self._unsub_pb = []
+
     # ------------------------------------------------------------------
     # Core update
     # ------------------------------------------------------------------
@@ -207,6 +261,8 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
 
         local_stations = filter_by_radius(enriched, lat, lon, radius)
+        # Keep a copy for PB intraday overlays (avoids re-fetching the CSV)
+        self._enriched_cache = list(local_stations)
         data = self._compute_area_data(local_stations)
 
         # Fetch national/regional averages for context (best-effort)
@@ -275,6 +331,94 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "Intraday ospzApi update applied: %d fuel types refreshed",
             len(updated.by_fuel),
         )
+
+    async def _async_pb_intraday_update(self) -> None:
+        """Fetch fresh prices from prezzibenzina.it and overlay onto cached data.
+
+        Uses the enriched MIMIT station cache as the base so station metadata
+        (name, address, brand) is always from the authoritative MIMIT registry.
+        PB prices overwrite the cached price of a matching station when a
+        station is found within PB_MATCH_RADIUS_KM.
+        Fails silently — the previous data is preserved on any error.
+        """
+        if self._pb_client is None or self.data is None or self._enriched_cache is None:
+            return
+
+        lat = self._config_entry.data[CONF_LATITUDE]
+        lon = self._config_entry.data[CONF_LONGITUDE]
+        radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
+
+        pb_stations = await self._pb_client.async_fetch_stations_near(lat, lon, radius)
+        if not pb_stations:
+            _LOGGER.debug(
+                "PrezzibenzinaIT intraday: no stations returned — keeping current data"
+            )
+            return
+
+        merged = self._merge_pb_stations(pb_stations, self._enriched_cache)
+
+        updated = self._compute_area_data(merged)
+        updated.data_source = "prezzibenzina_intraday"
+        updated.national_averages = self.data.national_averages
+        for fuel_type, area in updated.by_fuel.items():
+            area.national_average = self.data.national_averages.get(fuel_type)
+
+        self.async_set_updated_data(updated)
+        _LOGGER.debug(
+            "PrezzibenzinaIT intraday update applied: %d fuel types refreshed",
+            len(updated.by_fuel),
+        )
+
+    @staticmethod
+    def _merge_pb_stations(
+        pb_stations: list[dict],
+        base_stations: list[EnrichedStation],
+    ) -> list[EnrichedStation]:
+        """Overlay PrezzibenzinaIT prices onto MIMIT enriched station list.
+
+        For each PB price point the nearest MIMIT station of the same fuel
+        type within PB_MATCH_RADIUS_KM gets its price and timestamp updated.
+        Stations not matched by any PB entry keep their MIMIT price unchanged.
+
+        A shallow copy of each EnrichedStation is made so the original
+        ``_enriched_cache`` is not mutated.
+        """
+        from copy import copy  # local import to keep top-level imports tidy
+
+        updated = [copy(s) for s in base_stations]
+        matched = 0
+
+        for pb in pb_stations:
+            pb_lat: float = pb["lat"]
+            pb_lon: float = pb["lon"]
+            pb_fuel: str = pb["fuel_type"]
+            pb_price: float = pb["price"]
+            pb_is_self: bool = pb["is_self"]
+            pb_ts: datetime = pb["reported_at"]
+
+            best: EnrichedStation | None = None
+            best_dist = PB_MATCH_RADIUS_KM + 1.0  # sentinel > threshold
+
+            for s in updated:
+                if s.fuel_type != pb_fuel:
+                    continue
+                dist = haversine_km(pb_lat, pb_lon, s.station.lat, s.station.lon)
+                if dist < best_dist:
+                    best_dist = dist
+                    best = s
+
+            if best is not None and best_dist <= PB_MATCH_RADIUS_KM:
+                best.price = round(pb_price, 4)
+                best.is_self = pb_is_self
+                best.reported_at = pb_ts
+                matched += 1
+
+        _LOGGER.debug(
+            "PrezzibenzinaIT merge: %d/%d PB prices matched to MIMIT stations",
+            matched,
+            len(pb_stations),
+        )
+        return updated
 
     # ------------------------------------------------------------------
     # Private helpers
