@@ -63,7 +63,7 @@ _R2_HIGH_CONFIDENCE = 0.7
 _TREND_DAILY_THRESHOLD = 0.002   # 0.2 % per day → "stable" zone
 _CLAMP_LOW_FACTOR = 0.5
 _CLAMP_HIGH_FACTOR = 2.0
-_MIN_POINTS_LOW = 3
+_MIN_POINTS_LOW = 1
 _MIN_POINTS_MEDIUM = 14
 _MIN_POINTS_HIGH = 30
 _MAX_GAP_INTERPOLATE = 3
@@ -112,14 +112,16 @@ def compute_prediction(
 ) -> PredictionResult | None:
     """Compute a 7-day price forecast.
 
-    Returns ``None`` if fewer than ``_MIN_POINTS_LOW`` data points are
-    available (sensors should then report ``unavailable``).
+    Returns ``None`` only when no price data at all is available.
+    With a single point the forecast is flat (trend = stable, all 7 days
+    equal to today's price). Confidence increases with data volume:
+    low (<14), medium (14-29), high (≥30 with R²≥0.7).
     """
     prices = _extract_prices(history)
     if len(prices) < _MIN_POINTS_LOW:
         return None
 
-    # Historical changes
+    # Historical changes (only meaningful with enough data)
     weekly_change = _pct_change(prices[-8], prices[-1]) if len(prices) >= 8 else None
     monthly_change = _pct_change(prices[-31], prices[-1]) if len(prices) >= 31 else None
 
@@ -130,6 +132,24 @@ def compute_prediction(
         confidence_base = "medium"
     else:
         confidence_base = "low"
+
+    mean_7d = mean(prices[-7:]) if len(prices) >= 7 else mean(prices)
+
+    # With a single point we can only predict "flat at today's price"
+    if len(prices) == 1:
+        predicted = [round(prices[0], 4)] * 7
+        return PredictionResult(
+            trend_direction="stable",
+            trend_pct_7d=0.0,
+            predicted_prices=predicted,
+            confidence="low",
+            method_used="moving_average",
+            weekly_change_pct=None,
+            monthly_change_pct=None,
+            price_volatility=None,
+            price_momentum=None,
+            price_acceleration=None,
+        )
 
     # Fit linear regression on last 14 points (or all if fewer)
     fit_window = prices[-14:]
@@ -147,7 +167,6 @@ def compute_prediction(
         predicted = _weighted_moving_average_forecast(prices, slope)
 
     # Clamp predictions
-    mean_7d = mean(prices[-7:]) if len(prices) >= 7 else mean(prices)
     lo = _CLAMP_LOW_FACTOR * mean_7d
     hi = _CLAMP_HIGH_FACTOR * mean_7d
     predicted = [max(lo, min(hi, p)) for p in predicted]
