@@ -11,6 +11,7 @@ URL_PRICES = "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
 URL_REGISTRY = "https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv"
 URL_API_BASE = "https://carburanti.mise.gov.it"
 URL_API_POSITION = f"{URL_API_BASE}/ospzApi/ricerca/position"
+URL_REGIONAL_AVERAGES = "https://www.mimit.gov.it/images/stories/carburanti/MediaRegionaleStradale.csv"
 
 # ---------------------------------------------------------------------------
 # Config / options keys
@@ -101,12 +102,18 @@ SENSOR_CHEAPEST = "cheapest"
 SENSOR_AVERAGE = "average"
 SENSOR_TREND = "trend"
 SENSOR_PREDICTION = "prediction"
+SENSOR_PREDICTION_3D = "prediction_3d"
+SENSOR_AI_INSIGHT = "ai_insight"
 
 # ---------------------------------------------------------------------------
 # MIMIT update time (Europe/Rome)
 # ---------------------------------------------------------------------------
 MIMIT_UPDATE_HOUR = 8
 MIMIT_UPDATE_MINUTE = 15  # 15 min after MIMIT publishes at 08:00
+
+# Intraday spot check via ospzApi (live MIMIT database, potentially fresher than 08:00 CSV)
+MIMIT_INTRADAY_HOUR = 14
+MIMIT_INTRADAY_MINUTE = 30
 
 # ---------------------------------------------------------------------------
 # Registry cache TTL

@@ -72,7 +72,13 @@
         }
       },
       "prediction": {
-        "name": "{fuel_type} – Prediction"
+        "name": "{fuel_type} – Prediction (Tomorrow)"
+      },
+      "prediction_3d": {
+        "name": "{fuel_type} – 3-Day Prediction"
+      },
+      "ai_insight": {
+        "name": "{fuel_type} – AI Insight"
       }
     }
   },

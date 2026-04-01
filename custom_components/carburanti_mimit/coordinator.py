@@ -31,12 +31,22 @@ from .const import (
     DEFAULT_RADIUS_KM,
     DEFAULT_TOP_N,
     DEFAULT_UPDATE_INTERVAL_H,
+    MIMIT_INTRADAY_HOUR,
+    MIMIT_INTRADAY_MINUTE,
     MIMIT_UPDATE_HOUR,
     MIMIT_UPDATE_MINUTE,
     REGISTRY_CACHE_DAYS,
 )
 from .geo import filter_by_radius
-from .parser import EnrichedStation, Station, merge_prices_with_registry, parse_prices_csv, parse_registry_csv
+from .parser import (
+    EnrichedStation,
+    Station,
+    merge_prices_with_registry,
+    parse_ospzapi_distributori,
+    parse_prices_csv,
+    parse_regional_csv,
+    parse_registry_csv,
+)
 from .statistics_helper import async_push_price_statistics
 
 if TYPE_CHECKING:
@@ -57,6 +67,7 @@ class FuelAreaData:
     self_cheapest_price: float | None = None
     servito_cheapest_price: float | None = None
     station_count: int = 0
+    national_average: float | None = None  # from MediaRegionaleStradale.csv
 
 
 @dataclass
@@ -66,6 +77,8 @@ class CoordinatorData:
     by_fuel: dict[str, FuelAreaData]
     last_updated: datetime
     station_count_in_radius: int
+    data_source: str = "csv_morning"  # "csv_morning" | "ospzapi_intraday"
+    national_averages: dict[str, float] = field(default_factory=dict)
 
 
 class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
@@ -95,6 +108,10 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # Schedule daily refresh at MIMIT publish time (08:15 Europe/Rome)
         self._unsub_daily: Callable[[], None] | None = None
+        # Schedule intraday spot-check via ospzApi (14:30 Europe/Rome)
+        self._unsub_intraday: Callable[[], None] | None = None
+        # Shared AI results cache: fuel_type → {analysis, risk_level, price_3d, brief, price_tomorrow, confidence}
+        self.ai_cache: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Public lifecycle
@@ -135,6 +152,41 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsub_daily()
             self._unsub_daily = None
 
+    def schedule_intraday_refresh(self) -> None:
+        """Register a time trigger at 14:30 Europe/Rome for an ospzApi spot-check.
+
+        The ospzApi queries the live MIMIT database, which may contain prices
+        updated by stations after the 08:00 CSV snapshot.  This is a best-effort
+        supplement — if the API is unavailable the morning CSV data is kept.
+        """
+        if self._unsub_intraday is not None:
+            self._unsub_intraday()
+
+        tz = dt_util.get_time_zone("Europe/Rome")
+        target_time = datetime.now(tz).replace(
+            hour=MIMIT_INTRADAY_HOUR,
+            minute=MIMIT_INTRADAY_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+
+        @callback
+        def _on_intraday_time(_now: datetime) -> None:
+            _LOGGER.debug("Intraday ospzApi spot-check triggered at %02d:%02d Europe/Rome",
+                          MIMIT_INTRADAY_HOUR, MIMIT_INTRADAY_MINUTE)
+            self.hass.async_create_task(self._async_intraday_update())
+            self.schedule_intraday_refresh()  # re-schedule for tomorrow
+
+        self._unsub_intraday = ha_event.async_track_point_in_time(
+            self.hass, _on_intraday_time, target_time + timedelta(days=1)
+        )
+
+    def cancel_intraday_refresh(self) -> None:
+        """Unsubscribe from the intraday time trigger."""
+        if self._unsub_intraday is not None:
+            self._unsub_intraday()
+            self._unsub_intraday = None
+
     # ------------------------------------------------------------------
     # Core update
     # ------------------------------------------------------------------
@@ -157,6 +209,12 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         local_stations = filter_by_radius(enriched, lat, lon, radius)
         data = self._compute_area_data(local_stations)
 
+        # Fetch national/regional averages for context (best-effort)
+        national_averages = await self._fetch_national_averages()
+        data.national_averages = national_averages
+        for fuel_type, area in data.by_fuel.items():
+            area.national_average = national_averages.get(fuel_type)
+
         # Persist to local JSON history
         await self._storage.async_record_snapshot(data)
 
@@ -174,9 +232,65 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         return data
 
+    async def _async_intraday_update(self) -> None:
+        """Attempt an intraday spot-check via the MIMIT ospzApi.
+
+        Queries the live MIMIT database (which may be more current than the
+        08:00 CSV snapshot) and updates coordinator data if the API returns
+        valid results.  Fails silently — morning CSV data is preserved on any
+        error.
+        """
+        if self.data is None:
+            return  # can't update without base data
+
+        lat = self._config_entry.data[CONF_LATITUDE]
+        lon = self._config_entry.data[CONF_LONGITUDE]
+        radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
+
+        try:
+            distributori = await self._client.async_fetch_stations_near(lat, lon, radius)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Intraday ospzApi call failed (%s) — keeping morning CSV data", exc)
+            return
+
+        if not distributori:
+            _LOGGER.debug("Intraday ospzApi returned no stations — keeping morning CSV data")
+            return
+
+        registry = self._registry_cache or {}
+        enriched = parse_ospzapi_distributori(distributori, registry, lat, lon)
+
+        if not enriched:
+            _LOGGER.debug("Intraday ospzApi: could not parse distributori response — keeping morning data")
+            return
+
+        updated = self._compute_area_data(enriched)
+        updated.data_source = "ospzapi_intraday"
+        updated.national_averages = self.data.national_averages
+        for fuel_type, area in updated.by_fuel.items():
+            area.national_average = self.data.national_averages.get(fuel_type)
+
+        self.async_set_updated_data(updated)
+        _LOGGER.debug(
+            "Intraday ospzApi update applied: %d fuel types refreshed",
+            len(updated.by_fuel),
+        )
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _fetch_national_averages(self) -> dict[str, float]:
+        """Fetch and parse the MIMIT MediaRegionaleStradale.csv.
+
+        Returns an empty dict on any network or parse failure.
+        """
+        try:
+            raw = await self._client.async_fetch_regional_csv()
+            return parse_regional_csv(raw)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Could not fetch national averages (%s) — skipping", exc)
+            return {}
 
     async def _get_registry(self) -> dict[int, Station]:
         """Return the cached station registry, refreshing if stale."""

@@ -63,7 +63,7 @@ _R2_HIGH_CONFIDENCE = 0.7
 _TREND_DAILY_THRESHOLD = 0.002   # 0.2 % per day → "stable" zone
 _CLAMP_LOW_FACTOR = 0.5
 _CLAMP_HIGH_FACTOR = 2.0
-_MIN_POINTS_LOW = 7
+_MIN_POINTS_LOW = 1
 _MIN_POINTS_MEDIUM = 14
 _MIN_POINTS_HIGH = 30
 _MAX_GAP_INTERPOLATE = 3
@@ -74,6 +74,20 @@ _OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # Pattern used to extract risk level from AI response
 _RISK_PATTERN = re.compile(r"\[RISCHIO:(basso|medio|alto)\]", re.IGNORECASE)
+# Pattern used to extract AI 3-day price estimate  [PREZZO_3G:1.750]
+_PRICE_3D_PATTERN = re.compile(r"\[PREZZO_3G:([\d]+[.,][\d]+)\]", re.IGNORECASE)
+# Pattern used to extract the one-line AI summary  [SINTESI:testo breve]
+_SINTESI_PATTERN = re.compile(r"\[SINTESI:([^\]]{1,200})\]", re.IGNORECASE)
+
+# Italian excise duties (accise) — updated periodically by decree
+_ACCISE = {
+    "Benzina": 0.7284,
+    "Gasolio": 0.6174,
+    "GPL": 0.2928,
+    "Metano": 0.0000,
+    "HVO": 0.6174,
+    "Gasolio Riscaldamento": 0.4030,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +111,13 @@ class PredictionResult:
     price_momentum: float | None      = None   # (mean_7d − mean_prev_7d) / mean_prev_7d × 100
     price_acceleration: float | None  = None   # EUR/day² (2nd derivative estimate)
 
+    # Statistical 3-day forecast (predicted_prices[2], already in predicted_prices)
+    predicted_price_3d: float | None   = None
+
     # AI enrichment
     ai_analysis: str | None           = field(default=None)
     ai_risk_level: str | None         = field(default=None)  # "basso" | "medio" | "alto"
+    ai_predicted_price_3d: float | None = field(default=None)  # AI estimate for day+3
 
 
 # ---------------------------------------------------------------------------
@@ -112,14 +130,16 @@ def compute_prediction(
 ) -> PredictionResult | None:
     """Compute a 7-day price forecast.
 
-    Returns ``None`` if fewer than ``_MIN_POINTS_LOW`` data points are
-    available (sensors should then report ``unavailable``).
+    Returns ``None`` only when no price data at all is available.
+    With a single point the forecast is flat (trend = stable, all 7 days
+    equal to today's price). Confidence increases with data volume:
+    low (<14), medium (14-29), high (≥30 with R²≥0.7).
     """
     prices = _extract_prices(history)
     if len(prices) < _MIN_POINTS_LOW:
         return None
 
-    # Historical changes
+    # Historical changes (only meaningful with enough data)
     weekly_change = _pct_change(prices[-8], prices[-1]) if len(prices) >= 8 else None
     monthly_change = _pct_change(prices[-31], prices[-1]) if len(prices) >= 31 else None
 
@@ -130,6 +150,25 @@ def compute_prediction(
         confidence_base = "medium"
     else:
         confidence_base = "low"
+
+    mean_7d = mean(prices[-7:]) if len(prices) >= 7 else mean(prices)
+
+    # With a single point we can only predict "flat at today's price"
+    if len(prices) == 1:
+        predicted = [round(prices[0], 4)] * 7
+        return PredictionResult(
+            trend_direction="stable",
+            trend_pct_7d=0.0,
+            predicted_prices=predicted,
+            predicted_price_3d=predicted[2],
+            confidence="low",
+            method_used="moving_average",
+            weekly_change_pct=None,
+            monthly_change_pct=None,
+            price_volatility=None,
+            price_momentum=None,
+            price_acceleration=None,
+        )
 
     # Fit linear regression on last 14 points (or all if fewer)
     fit_window = prices[-14:]
@@ -147,7 +186,6 @@ def compute_prediction(
         predicted = _weighted_moving_average_forecast(prices, slope)
 
     # Clamp predictions
-    mean_7d = mean(prices[-7:]) if len(prices) >= 7 else mean(prices)
     lo = _CLAMP_LOW_FACTOR * mean_7d
     hi = _CLAMP_HIGH_FACTOR * mean_7d
     predicted = [max(lo, min(hi, p)) for p in predicted]
@@ -174,6 +212,7 @@ def compute_prediction(
         trend_direction=trend_dir,
         trend_pct_7d=round(trend_pct, 2),
         predicted_prices=predicted,
+        predicted_price_3d=predicted[2] if len(predicted) >= 3 else None,
         confidence=confidence_base,
         method_used=method,
         weekly_change_pct=round(weekly_change, 2) if weekly_change is not None else None,
@@ -198,15 +237,19 @@ def _extract_prices(history: list[DailySnapshot]) -> list[float]:
             while j < len(prices) and prices[j] is None:
                 j += 1
             gap_len = j - i
-            if gap_len <= _MAX_GAP_INTERPOLATE and i > 0 and j < len(prices):
+            if i == 0:
+                # Leading None values — skip them, can't interpolate without a prior price
+                prices = prices[j:]
+                i = 0
+            elif gap_len <= _MAX_GAP_INTERPOLATE and j < len(prices):
                 p_start = prices[i - 1]
                 p_end = prices[j]
                 for k in range(gap_len):
                     prices[i + k] = p_start + (p_end - p_start) * (k + 1) / (gap_len + 1)
+                i = j
             else:
                 prices = prices[:i]
                 break
-            i = j
         else:
             i += 1
 
@@ -363,20 +406,26 @@ async def async_ai_prediction(
     api_key: str,
     history: list[DailySnapshot],
     fuel_type: str,
-    prediction: PredictionResult,
-) -> tuple[str | None, str | None]:
+    prediction: PredictionResult | None,
+    current_price: float | None = None,
+    national_average: float | None = None,
+) -> tuple[str | None, str | None, float | None]:
     """Call an LLM for a geopolitical and market analysis of the price trend.
 
-    Returns ``(ai_analysis, ai_risk_level)`` or ``(None, None)`` on error.
+    Works from day 1: when *prediction* is ``None`` the prompt focuses on pure
+    geopolitical/market context for the current price; as history accumulates
+    the prompt is progressively enriched with statistical indicators.
 
-    The AI is asked to:
-    - Analyse market and geopolitical factors driving the observed trend
-    - Consider crude oil markets, OPEC+ decisions, EUR/USD, Italian taxes
-    - Provide a risk level tag: [RISCHIO:basso], [RISCHIO:medio], [RISCHIO:alto]
+    Returns ``(ai_analysis, ai_risk_level, ai_price_3d, ai_brief)`` or
+    ``(None, None, None, None)`` on error.
+    - ai_analysis:    full geopolitical analysis text
+    - ai_risk_level:  "basso" | "medio" | "alto" parsed from [RISCHIO:...] tag
+    - ai_price_3d:    AI-estimated price in 3 days parsed from [PREZZO_3G:...] tag
+    - ai_brief:       one-sentence summary parsed from [SINTESI:...] tag
     """
     from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI  # avoid circular at top
 
-    prompt = _build_geopolitical_prompt(history, fuel_type, prediction)
+    prompt = _build_geopolitical_prompt(history, fuel_type, prediction, current_price, national_average)
 
     try:
         if provider == AI_PROVIDER_CLAUDE:
@@ -384,90 +433,199 @@ async def async_ai_prediction(
         elif provider == AI_PROVIDER_OPENAI:
             text = await _call_openai(session, api_key, prompt)
         else:
-            return None, None
+            return None, None, None, None
 
         if not text:
-            return None, None
+            _LOGGER.warning("AI call returned empty response")
+            return None, None, None, None
 
         risk = _parse_risk_level(text)
-        return text.strip(), risk
+        price_3d = _parse_price_3d(text)
+        brief = _parse_brief(text)
+        if brief is None:
+            _LOGGER.warning(
+                "AI response missing [SINTESI:] tag — response preview: %.300s",
+                text,
+            )
+        else:
+            _LOGGER.debug("AI parsed — risk=%s price_3d=%s brief=%s", risk, price_3d, brief)
+        return text.strip(), risk, price_3d, brief
 
     except Exception as exc:  # noqa: BLE001
-        _LOGGER.debug("AI prediction call failed (%s) — skipping", exc)
-    return None, None
+        _LOGGER.warning("AI prediction call failed (%s: %s) — skipping", type(exc).__name__, exc)
+    return None, None, None, None
 
 
 def _build_geopolitical_prompt(
     history: list[DailySnapshot],
     fuel_type: str,
-    prediction: PredictionResult,
+    prediction: PredictionResult | None,
+    current_price: float | None = None,
+    national_average: float | None = None,
 ) -> str:
-    """Build a rich prompt for geopolitical + market analysis."""
-    history_lines = [
-        f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
-        for s in history[-30:]
-    ]
-    history_text = "\n".join(history_lines)
+    """Build an adaptive prompt for geopolitical + market analysis.
 
-    volatility_text = (
-        f"{prediction.price_volatility:.4f} (coefficiente di variazione)"
-        if prediction.price_volatility is not None else "N/D"
-    )
-    momentum_text = (
-        f"{prediction.price_momentum:+.2f}% (media 7gg vs settimana precedente)"
-        if prediction.price_momentum is not None else "N/D"
-    )
-    acceleration_text = (
-        f"{prediction.price_acceleration:+.6f} EUR/giorno²"
-        if prediction.price_acceleration is not None else "N/D"
-    )
-    weekly_text = (
-        f"{prediction.weekly_change_pct:+.2f}%"
-        if prediction.weekly_change_pct is not None else "N/D"
-    )
-    monthly_text = (
-        f"{prediction.monthly_change_pct:+.2f}%"
-        if prediction.monthly_change_pct is not None else "N/D"
-    )
-
-    seasonal = _seasonal_context()
+    Enrichment levels:
+    - No history  → pure geopolitical/market context for the current price
+    - Some history → adds observed price trend
+    - Full stats   → adds 7-day forecast, volatility, momentum, acceleration
+    """
     today = date.today().isoformat()
+    seasonal = _seasonal_context()
+    accisa = _ACCISE.get(fuel_type, 0.0)
 
-    return f"""Sei un analista di mercato energetico specializzato nel mercato italiano dei carburanti.
+    # ---- Price / history section ----------------------------------------
+    recent = history[-30:] if history else []
+    if recent:
+        history_lines = [
+            f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
+            for s in recent
+        ]
+        history_text = "\n".join(history_lines)
+        data_days = len([s for s in recent if s.cheapest is not None])
+        price_section = (
+            f"=== DATI STORICI LOCALI — {fuel_type} (ultimi {data_days} giorni, fino al {today}) ===\n"
+            f"{history_text}"
+        )
+    elif current_price is not None:
+        price_section = (
+            f"=== PREZZO CORRENTE — {fuel_type} (rilevato il {today}) ===\n"
+            f"  Prezzo locale: {current_price:.4f} EUR/L\n"
+            f"  (Primo giorno di monitoraggio — storico in costruzione)"
+        )
+    else:
+        price_section = f"=== CARBURANTE: {fuel_type} — data: {today} ==="
 
-=== DATI STORICI — {fuel_type} (ultimi 30 giorni fino al {today}) ===
-{history_text}
+    # ---- National average context ----------------------------------------
+    if national_average is not None:
+        ref_price = current_price or (history[-1].cheapest if history and history[-1].cheapest else None)
+        if ref_price is not None:
+            diff_pct = (ref_price - national_average) / national_average * 100
+            sign = "sopra" if diff_pct >= 0 else "sotto"
+            nat_section = (
+                f"\n=== CONFRONTO NAZIONALE ===\n"
+                f"• Media nazionale {fuel_type}: {national_average:.4f} EUR/L\n"
+                f"• Prezzo locale: {abs(diff_pct):.1f}% {sign} la media nazionale"
+            )
+        else:
+            nat_section = (
+                f"\n=== CONFRONTO NAZIONALE ===\n"
+                f"• Media nazionale {fuel_type}: {national_average:.4f} EUR/L"
+            )
+    else:
+        nat_section = ""
 
-=== INDICATORI STATISTICI ===
-• Tendenza (modello):     {prediction.trend_direction} ({prediction.trend_pct_7d:+.2f}% in 7 giorni)
-• Confidenza modello:     {prediction.confidence} (metodo: {prediction.method_used})
-• Volatilità:             {volatility_text}
-• Momentum prezzi:        {momentum_text}
-• Accelerazione:          {acceleration_text}
-• Variazione settimanale: {weekly_text}
-• Variazione mensile:     {monthly_text}
+    # ---- Statistical indicators (adaptive) --------------------------------
+    if prediction is not None:
+        vol_txt = (
+            f"{prediction.price_volatility:.4f} (CV)" if prediction.price_volatility is not None else "N/D"
+        )
+        mom_txt = (
+            f"{prediction.price_momentum:+.2f}% (7gg vs 7gg prec.)" if prediction.price_momentum is not None else "N/D"
+        )
+        acc_txt = (
+            f"{prediction.price_acceleration:+.6f} EUR/g²" if prediction.price_acceleration is not None else "N/D"
+        )
+        wk_txt  = f"{prediction.weekly_change_pct:+.2f}%"  if prediction.weekly_change_pct  is not None else "N/D"
+        mo_txt  = f"{prediction.monthly_change_pct:+.2f}%" if prediction.monthly_change_pct is not None else "N/D"
+        p3d     = f"{prediction.predicted_price_3d:.4f} EUR/L" if prediction.predicted_price_3d is not None else "N/D"
+        stats_section = f"""
+=== MODELLO STATISTICO ===
+• Tendenza:               {prediction.trend_direction} ({prediction.trend_pct_7d:+.2f}% in 7 giorni)
+• Confidenza / metodo:    {prediction.confidence} / {prediction.method_used}
 • Previsione domani:      {prediction.predicted_prices[0]:.4f} EUR/L
+• Previsione +3 giorni:   {p3d}
+• Volatilità:             {vol_txt}
+• Momentum:               {mom_txt}
+• Accelerazione:          {acc_txt}
+• Variaz. settimanale:    {wk_txt}
+• Variaz. mensile:        {mo_txt}"""
+        context_verb = "che giustificano o modificano la tendenza statistica osservata"
+    else:
+        stats_section = (
+            "\n=== MODELLO STATISTICO ===\n"
+            "  Non ancora disponibile (primo giorno di monitoraggio)."
+        )
+        context_verb = "che determinano il livello di prezzo attuale"
+
+    return f"""Sei un analista di mercato energetico senior specializzato nel mercato italiano dei carburanti.
+La tua analisi deve integrare i dati di prezzo forniti con la tua conoscenza aggiornata dei mercati globali.
+
+{price_section}
+{stats_section}
+{nat_section}
+
+=== STRUTTURA FISCALE {fuel_type.upper()} (IT) ===
+• Accisa: {accisa:.4f} EUR/L  •  IVA: 22%  •  Componente fiscale totale: ~65% del prezzo finale
 
 === CONTESTO STAGIONALE ===
 {seasonal}
 
-=== RICHIESTA DI ANALISI ===
-Fornisci un'analisi concisa (3-5 frasi) in italiano che:
+=== FRAMEWORK DI ANALISI — considera TUTTI i fattori rilevanti ===
 
-1. Spieghi i fattori di mercato e geopolitici che possono giustificare la tendenza osservata,
-   considerando in particolare:
-   - Andamento del prezzo del petrolio Brent/WTI e decisioni recenti OPEC+
-   - Tensioni geopolitiche che impattano le forniture (Russia, Medio Oriente, Nord Africa)
-   - Effetto del tasso di cambio EUR/USD sui costi d'importazione italiani
-   - Componente fiscale italiana (accise + IVA ≈ 65% del prezzo finale)
-   - Stagionalità della domanda e cicli di manutenzione delle raffinerie europee
+MERCATO PETROLIFERO GLOBALE
+• Prezzo Brent/WTI: tendenza recente, spread Brent-WTI, contango/backwardation
+• OPEC+: ultime decisioni su quote produzione, compliance dei singoli paesi (Saudi Arabia, UAE, Iraq,
+  Russia), eventuali tagli volontari straordinari o riunioni straordinarie
+• Offerta non-OPEC+: shale USA (rig count, DUC wells), Canada oil sands, Brasile, Norvegia, Guyana
+• Riserva strategica USA (SPR): rilasci o ricostituzione
+• Domanda globale: ripresa cinese (import petrolio, PMI), ciclo industriale europeo, stagionalità USA
 
-2. Valuti il rischio di ulteriori rincari nelle prossime 2 settimane.
+TENSIONI GEOPOLITICHE E SUPPLY DISRUPTIONS
+• Russia-Ucraina: sanzioni petrolio/gas russo, price cap G7/UE ($60/bbl), rotte alternative,
+  shadow fleet, manutenzione oleodotti (Druzhba), flussi LNG
+• Medio Oriente: tensioni Iran-USA/Israele (rischio chiusura Stretto di Hormuz = ~20% commercio globale),
+  accordi Abraham, stabilità Golfo Persico
+• Mar Rosso / Houthi Yemen: attacchi alle navi cargo (+10-15 giorni vs rotta Suez, +costi assicurazione),
+  rotta alternativa circumnavigazione Africa (Baltic Clean Tanker Index)
+• Libya: frammentazione politica, interruzioni produzione (spesso sotto quota OPEC+)
+• Algeria / Nigeria / Angola: affidabilità forniture verso Europa, gasdotti verso Italia (Medgaz, TMPC)
+• Venezuela: sanzioni USA, ripresa produzione, accordi con Chevron
+• Iraq Kurdistan: controversie oleodotto Turchia-Iraq
 
-3. Concluda con UNA sola riga contenente esattamente il tag di rischio nel formato:
-   [RISCHIO:basso] oppure [RISCHIO:medio] oppure [RISCHIO:alto]
+RAFFINAZIONE E LOGISTICA EUROPEA
+• Capacità raffinazione europea: manutenzioni stagionali (tipicamente primavera/autunno),
+  chiusure per transizione energetica
+• Raffinerie italiane (ENI Sannazzaro de' Burgondi, Saras Cagliari/Sarroch, Italiana Petroli/API Falconara,
+  ENI Taranto, Kuwait Petroleum Milazzo): eventuali fermi tecnici o problemi operativi
+• Crack spread benzina/gasolio: margini di raffinazione come indicatore di pressione sui prezzi retail
+• Stoccaggi prodotti raffinati UE (report AIPe/Euroilstock): livelli vs medie stagionali
+• Costi noli petroliere: Baltic Dirty Tanker Index, Baltic Clean Tanker Index
 
-Rispondi SOLO in italiano. Sii diretto e informativo, senza formule di cortesia."""
+FATTORI MACROECONOMICI E VALUTARI
+• EUR/USD: ogni +1% EUR/USD → circa -0.7/1 cent/L in Italia; BCE vs Fed divergenza politica monetaria
+• Commodity correlate: gas naturale TTF (impatto costi energetici raffinazione), carbone
+• Carbon credits ETS (EU ETS): prezzo CO₂ e impatto su costi raffinazione
+• Inflazione e PIL eurozona/Italia: impatto su domanda carburanti
+
+POLITICHE ITALIANE E UE
+• Governo italiano: eventuale rinnovo/modifica sconti accise, tetti di prezzo, misure di emergenza
+• UE: RED III (quote biocarburanti), fit-for-55, eventuali sanzioni energetiche aggiuntive a Russia
+• Transizione energetica: velocità adozione EV in Italia (impatto domanda benzina/diesel a medio termine)
+• ARERA e Garante prezzi carburanti: eventuali interventi regolatori
+
+=== OUTPUT RICHIESTO ===
+Rispondi SOLO in italiano con questo formato esatto:
+
+**ANALISI** (4-6 frasi):
+[Analisi geopolitica e di mercato che spiega i fattori principali {context_verb}.
+Integra la tua conoscenza aggiornata con i dati forniti. Sii specifico su quali eventi
+concreti stanno influenzando o potrebbero influenzare il prezzo.]
+
+**STIMA 3 GIORNI**:
+[Una frase sulla tua stima del prezzo tra 3 giorni considerando tutti i fattori sopra.
+Poi su una riga separata SOLO il tag: [PREZZO_3G:X.XXX] con il prezzo stimato in EUR/L (es. [PREZZO_3G:1.752])]
+
+**RISCHIO RINCARI 2 SETTIMANE**:
+[Una frase sul rischio.
+Poi su una riga separata SOLO il tag: [RISCHIO:basso] oppure [RISCHIO:medio] oppure [RISCHIO:alto]]
+
+**SINTESI**:
+[Una sola frase (max 12 parole) che riassume il quadro attuale, da mostrare come stato del sensore.
+Es: "Brent stabile, OPEC+ invariato, prezzi locali in linea con media."
+Poi su una riga separata SOLO il tag: [SINTESI:testo max 12 parole]]
+
+Nessuna formula di cortesia. Solo analisi diretta e concisa."""
 
 
 def _parse_risk_level(text: str) -> str | None:
@@ -475,6 +633,43 @@ def _parse_risk_level(text: str) -> str | None:
     match = _RISK_PATTERN.search(text)
     if match:
         return match.group(1).lower()
+    return None
+
+
+def _parse_price_3d(text: str) -> float | None:
+    """Extract 3-day price estimate from the AI response tag [PREZZO_3G:X.XXX]."""
+    match = _PRICE_3D_PATTERN.search(text)
+    if match:
+        try:
+            return round(float(match.group(1).replace(",", ".")), 4)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_brief(text: str) -> str | None:
+    """Extract the one-line AI summary.
+
+    First tries the structured [SINTESI:...] tag. Falls back to extracting the
+    first non-empty sentence that follows the **SINTESI**: section header, in
+    case the model outputs the section text but omits the tag markers.
+    """
+    # Primary: tag-based extraction
+    match = _SINTESI_PATTERN.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: look for the SINTESI section and grab the first meaningful line
+    sintesi_section = re.search(
+        r"\*\*SINTESI\*\*[:\s]*\n(.+?)(?:\n|$)", text, re.IGNORECASE
+    )
+    if sintesi_section:
+        candidate = sintesi_section.group(1).strip()
+        # Strip any residual markdown or bracket artifacts and limit length
+        candidate = re.sub(r"[\[\]`*_]", "", candidate).strip()
+        if candidate:
+            return candidate[:150]
+
     return None
 
 
@@ -493,7 +688,7 @@ async def _call_claude(
     }
     payload = {
         "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 500,
+        "max_tokens": 800,
         "messages": [{"role": "user", "content": prompt}],
     }
     async with session.post(
@@ -524,7 +719,7 @@ async def _call_openai(
     }
     payload = {
         "model": "gpt-4o-mini",
-        "max_tokens": 500,
+        "max_tokens": 800,
         "messages": [{"role": "user", "content": prompt}],
     }
     async with session.post(
