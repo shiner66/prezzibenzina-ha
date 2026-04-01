@@ -25,6 +25,7 @@ from .const import (
     PB_ENDPOINT_GET_PRICES,
     PB_ENDPOINT_GET_SESSION_KEY,
     PB_ENDPOINT_GET_STATIONS,
+    PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE,
     PB_FUEL_TO_MIMIT,
     PB_PLATFORM,
     PB_SDK,
@@ -91,13 +92,49 @@ class PrezzibenzinaClient:
         radius_km: float,
     ) -> list[dict[str, Any]]:
         session_key = await self._ensure_session()
-        params = self._build_params(lat, lon, radius_km, session_key)
+        base = self._build_session_params(session_key)
 
+        # ------------------------------------------------------------------
+        # Strategia 1: pb_get_stations_from_polyline
+        # L'app usa questo endpoint per "StationsViewModel.getStationsInArea".
+        # Codifica il bounding box come Google Encoded Polyline (formato nativo
+        # dell'SDK Android) e lo passa come param "polyline".
+        # ------------------------------------------------------------------
+        polyline = _encode_bounding_box(lat, lon, radius_km)
+        poly_params = {**base, "polyline": polyline}
         _LOGGER.debug(
-            "PrezzibenzinaClient → pb_get_stations lat=%s lng=%s distance=%s session=%s",
-            params["lat"], params["lng"], params["distance"], "yes" if session_key else "no",
+            "PrezzibenzinaClient → pb_get_stations_from_polyline polyline=%s session=%s",
+            polyline, "yes" if session_key else "no",
         )
+        raw = await self._try_get(PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE, poly_params)
+        if raw is None:
+            raw = await self._try_post_form(PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE, poly_params)
 
+        if raw is not None:
+            _LOGGER.debug(
+                "PrezzibenzinaClient pb_get_stations_from_polyline risposta (primi 1000): %s",
+                str(raw)[:1000],
+            )
+            nearby = self._filter_nearby(self._parse_station_list(raw), lat, lon, radius_km)
+            _LOGGER.debug(
+                "pb_get_stations_from_polyline: %d stazioni nel raggio %.0f km",
+                len(nearby), radius_km,
+            )
+            if nearby:
+                return await self._fetch_prices_for_stations(
+                    nearby, [s["id"] for s in nearby], session_key
+                )
+
+        # ------------------------------------------------------------------
+        # Strategia 2: pb_get_stations con lat/lng (fallback)
+        # L'API sembra ignorare le coordinate ma potrebbe cambiare in futuro;
+        # il filtro client-side è comunque applicato.
+        # ------------------------------------------------------------------
+        params = self._build_params(lat, lon, radius_km, session_key)
+        _LOGGER.debug(
+            "PrezzibenzinaClient → pb_get_stations (fallback) lat=%s lng=%s distance=%s",
+            params["lat"], params["lng"], params["distance"],
+        )
         raw = await self._try_get(PB_ENDPOINT_GET_STATIONS, params)
         if raw is None:
             raw = await self._try_post_form(PB_ENDPOINT_GET_STATIONS, params)
@@ -105,30 +142,42 @@ class PrezzibenzinaClient:
             return []
 
         _LOGGER.debug(
-            "PrezzibenzinaClient pb_get_stations risposta raw (primi 1000 car): %s",
-            str(raw)[:1000],
+            "PrezzibenzinaClient pb_get_stations risposta (primi 800 car): %s",
+            str(raw)[:800],
         )
-
-        # Estrai la lista di stazioni (solo metadati, senza prezzi)
-        station_items = self._parse_station_list(raw)
-        if not station_items:
-            return []
-
-        # Filtra lato client per raggio: l'API potrebbe non rispettare il geo-filter
-        nearby = [
-            s for s in station_items
-            if _haversine(lat, lon, s["lat"], s["lon"]) <= radius_km
-        ]
+        nearby = self._filter_nearby(self._parse_station_list(raw), lat, lon, radius_km)
         _LOGGER.debug(
-            "PrezzibenzinaClient: %d stazioni totali, %d nel raggio %.0f km",
-            len(station_items), len(nearby), radius_km,
+            "pb_get_stations fallback: %d stazioni nel raggio %.0f km",
+            len(nearby), radius_km,
         )
         if not nearby:
             return []
+        return await self._fetch_prices_for_stations(
+            nearby, [s["id"] for s in nearby], session_key
+        )
 
-        # Recupera i prezzi per le stazioni vicine
-        station_ids = [s["id"] for s in nearby]
-        return await self._fetch_prices_for_stations(nearby, station_ids, session_key)
+    @staticmethod
+    def _filter_nearby(
+        stations: list[dict[str, Any]],
+        lat: float,
+        lon: float,
+        radius_km: float,
+    ) -> list[dict[str, Any]]:
+        return [s for s in stations if _haversine(lat, lon, s["lat"], s["lon"]) <= radius_km]
+
+    def _build_session_params(self, session_key: str | None) -> dict[str, Any]:
+        """Parametri di sessione/device senza coordinate geografiche."""
+        params: dict[str, Any] = {
+            "platform": PB_PLATFORM,
+            "pbid": self._pbid,
+            "udid": self._udid,
+            "appversion": PB_APP_VERSION,
+            "sdk": PB_SDK,
+        }
+        if session_key:
+            params["session_key"] = session_key
+            params["token"] = session_key
+        return params
 
     async def _fetch_prices_for_stations(
         self,
@@ -459,6 +508,46 @@ class PrezzibenzinaClient:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _encode_bounding_box(lat: float, lon: float, radius_km: float) -> str:
+    """Codifica un bounding box attorno a (lat, lon) come Google Encoded Polyline.
+
+    Il rettangolo è rappresentato da 5 vertici (il primo si ripete per chiuderlo):
+      SW → NW → NE → SE → SW
+
+    Questo è il formato prodotto dall'SDK Android di Google Maps e verosimilmente
+    atteso dall'endpoint pb_get_stations_from_polyline.
+    """
+    import math
+
+    dlat = radius_km / 111.32
+    dlon = radius_km / (111.32 * math.cos(math.radians(lat)))
+    sw = (lat - dlat, lon - dlon)
+    nw = (lat + dlat, lon - dlon)
+    ne = (lat + dlat, lon + dlon)
+    se = (lat - dlat, lon + dlon)
+    return _google_encode_polyline([sw, nw, ne, se, sw])
+
+
+def _google_encode_polyline(points: list[tuple[float, float]]) -> str:
+    """Google Encoded Polyline Algorithm (https://developers.google.com/maps/documentation/utilities/polylinealgorithm)."""
+    result: list[str] = []
+    prev_lat = prev_lon = 0
+    for lat, lon in points:
+        for value, prev in ((lat, prev_lat), (lon, prev_lon)):
+            rounded = round(value * 1e5)
+            delta = rounded - prev
+            delta <<= 1
+            if delta < 0:
+                delta = ~delta
+            while delta >= 0x20:
+                result.append(chr((0x20 | (delta & 0x1f)) + 63))
+                delta >>= 5
+            result.append(chr(delta + 63))
+        prev_lat = round(lat * 1e5)
+        prev_lon = round(lon * 1e5)
+    return "".join(result)
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

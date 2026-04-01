@@ -137,6 +137,7 @@ PB_ENDPOINT_GET_PRICES = "pb_get_prices"
 PB_ENDPOINT_GET_SESSION_KEY = "pb_get_session_key"
 PB_ENDPOINT_CREATE_SESSION = "pb_create_session"
 PB_ENDPOINT_CHECK_SESSION = "pb_check_session"
+PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE = "pb_get_stations_from_polyline"
 
 # Fake Android client metadata (sent as query/form params)
 PB_PLATFORM = "android"
