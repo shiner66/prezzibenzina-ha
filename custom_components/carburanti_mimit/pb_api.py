@@ -101,8 +101,8 @@ class PrezzibenzinaClient:
             return []
 
         _LOGGER.debug(
-            "PrezzibenzinaClient pb_get_stations risposta raw: %s",
-            str(raw)[:500],
+            "PrezzibenzinaClient pb_get_stations risposta raw (primi 1000 car): %s",
+            str(raw)[:1000],
         )
         return self._parse_stations_response(raw)
 
@@ -235,31 +235,52 @@ class PrezzibenzinaClient:
         self,
         raw: Any,
     ) -> list[dict[str, Any]]:
-        """Parse a pb_get_stations response into normalised dicts.
+        """Parse una risposta pb_get_stations in una lista di dict normalizzati.
 
-        The exact JSON shape is unknown; we probe common wrapper keys and
-        handle both flat and nested price structures.
+        La risposta è avvolta nel nome dell'endpoint:
+          {'pb_get_stations': {'status':'ok', 'stations': {'station': [...]}}}
+
+        Le stazioni possono arrivare come:
+          - {'station': [...]}  → dict con chiave 'station'
+          - [...]               → lista piatta
         """
         if not isinstance(raw, dict):
             return []
 
-        stations_list: list | None = None
-        for key in ("stations", "data", "distributori", "results", "items"):
-            candidate = raw.get(key)
-            if isinstance(candidate, list):
-                stations_list = candidate
-                break
+        payload = _unwrap_response(raw)
 
-        if stations_list is None:
+        # Estrai la lista stazioni
+        stations_container = payload.get("stations")
+        if isinstance(stations_container, dict):
+            # {'station': [...]}
+            stations_list: list = stations_container.get("station") or []
+        elif isinstance(stations_container, list):
+            stations_list = stations_container
+        else:
+            stations_list = []
+            for key in ("data", "distributori", "results", "items"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    stations_list = candidate
+                    break
+
+        if not stations_list:
             return []
+
+        # Log struttura primo item per debug futuro
+        if stations_list:
+            _LOGGER.debug(
+                "PrezzibenzinaClient: struttura primo item stazione: %s",
+                str(stations_list[0])[:400],
+            )
 
         results: list[dict[str, Any]] = []
         for item in stations_list:
             if not isinstance(item, dict):
                 continue
 
-            lat = _coerce_float(item.get("latitude") or item.get("lat"))
-            lon = _coerce_float(item.get("longitude") or item.get("lng") or item.get("lon"))
+            lat = _coerce_float(item.get("lat") or item.get("latitude"))
+            lon = _coerce_float(item.get("lng") or item.get("lon") or item.get("longitude"))
             if lat is None or lon is None:
                 continue
 
@@ -316,24 +337,42 @@ class PrezzibenzinaClient:
 
     @staticmethod
     def _extract_token(raw: Any) -> str | None:
-        """Extract a session token string from various response shapes."""
+        """Estrae il session token dalla risposta di pb_get_session_key.
+
+        Il server avvolge la risposta nel nome dell'endpoint:
+          {'pb_get_session_key': {'status': 'ok', 'token': 'abc123'}}
+        _unwrap_response() rimuove quel wrapper prima di cercare il token.
+        """
         if not isinstance(raw, dict):
             return None
-        for key in ("session_key", "token", "sessiontoken", "key", "data"):
-            val = raw.get(key)
+        payload = _unwrap_response(raw)
+        for key in ("token", "session_key", "sessiontoken", "key"):
+            val = payload.get(key)
             if isinstance(val, str) and len(val) > 4:
                 return val
-            if isinstance(val, dict):
-                for subkey in ("session_key", "token", "key"):
-                    subval = val.get(subkey)
-                    if isinstance(subval, str) and len(subval) > 4:
-                        return subval
         return None
 
 
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _unwrap_response(raw: dict) -> dict:
+    """Rimuove il wrapper col nome dell'endpoint.
+
+    Ogni risposta PB è avvolta nel nome dell'azione:
+      {'pb_get_stations': {'status': 'ok', 'stations': {...}}}
+      → {'status': 'ok', 'stations': {...}}
+
+    Se il dict ha esattamente una chiave il cui valore è un dict, lo
+    spacchetta; altrimenti restituisce raw invariato.
+    """
+    if len(raw) == 1:
+        inner = next(iter(raw.values()))
+        if isinstance(inner, dict):
+            return inner
+    return raw
 
 
 def _parse_json_body(endpoint: str, method: str, raw: str) -> dict | list | None:
