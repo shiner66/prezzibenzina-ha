@@ -22,6 +22,7 @@ from .const import (
     PB_API_BASE,
     PB_APP_VERSION,
     PB_ENDPOINT_CREATE_SESSION,
+    PB_ENDPOINT_GET_PRICES,
     PB_ENDPOINT_GET_SESSION_KEY,
     PB_ENDPOINT_GET_STATIONS,
     PB_FUEL_TO_MIMIT,
@@ -92,10 +93,13 @@ class PrezzibenzinaClient:
         session_key = await self._ensure_session()
         params = self._build_params(lat, lon, radius_km, session_key)
 
-        # Try GET first (most likely verb for a read endpoint)
+        _LOGGER.debug(
+            "PrezzibenzinaClient → pb_get_stations lat=%s lng=%s distance=%s session=%s",
+            params["lat"], params["lng"], params["distance"], "yes" if session_key else "no",
+        )
+
         raw = await self._try_get(PB_ENDPOINT_GET_STATIONS, params)
         if raw is None:
-            # Fallback: POST application/x-www-form-urlencoded
             raw = await self._try_post_form(PB_ENDPOINT_GET_STATIONS, params)
         if raw is None:
             return []
@@ -104,7 +108,62 @@ class PrezzibenzinaClient:
             "PrezzibenzinaClient pb_get_stations risposta raw (primi 1000 car): %s",
             str(raw)[:1000],
         )
-        return self._parse_stations_response(raw)
+
+        # Estrai la lista di stazioni (solo metadati, senza prezzi)
+        station_items = self._parse_station_list(raw)
+        if not station_items:
+            return []
+
+        # Filtra lato client per raggio: l'API potrebbe non rispettare il geo-filter
+        nearby = [
+            s for s in station_items
+            if _haversine(lat, lon, s["lat"], s["lon"]) <= radius_km
+        ]
+        _LOGGER.debug(
+            "PrezzibenzinaClient: %d stazioni totali, %d nel raggio %.0f km",
+            len(station_items), len(nearby), radius_km,
+        )
+        if not nearby:
+            return []
+
+        # Recupera i prezzi per le stazioni vicine
+        station_ids = [s["id"] for s in nearby]
+        return await self._fetch_prices_for_stations(nearby, station_ids, session_key)
+
+    async def _fetch_prices_for_stations(
+        self,
+        stations: list[dict[str, Any]],
+        station_ids: list[str],
+        session_key: str | None,
+    ) -> list[dict[str, Any]]:
+        """Chiama pb_get_prices per un gruppo di stazioni e restituisce i prezzi normalizzati."""
+        prices_params: dict[str, Any] = {
+            "stationId": ",".join(station_ids),
+            "stationIds": ",".join(station_ids),
+            "platform": PB_PLATFORM,
+            "pbid": self._pbid,
+            "udid": self._udid,
+            "appversion": PB_APP_VERSION,
+        }
+        if session_key:
+            prices_params["session_key"] = session_key
+            prices_params["token"] = session_key
+
+        raw = await self._try_get(PB_ENDPOINT_GET_PRICES, prices_params)
+        if raw is None:
+            raw = await self._try_post_form(PB_ENDPOINT_GET_PRICES, prices_params)
+
+        _LOGGER.debug(
+            "PrezzibenzinaClient pb_get_prices risposta raw (primi 800 car): %s",
+            str(raw)[:800],
+        )
+
+        if raw is None:
+            return []
+
+        # Costruisce un indice lat/lon per stazione tramite id
+        station_by_id = {s["id"]: s for s in stations}
+        return self._parse_prices_response(raw, station_by_id)
 
     def _build_params(
         self,
@@ -118,6 +177,10 @@ class PrezzibenzinaClient:
             "lng": lon,
             "latitude": lat,
             "longitude": lon,
+            # Varianti del raggio — l'API potrebbe chiamarlo in modi diversi
+            "distance": int(radius_km),
+            "radius": int(radius_km),
+            "raggio": int(radius_km),
             "platform": PB_PLATFORM,
             "pbid": self._pbid,
             "udid": self._udid,
@@ -231,107 +294,147 @@ class PrezzibenzinaClient:
     # Response parsing
     # ------------------------------------------------------------------
 
-    def _parse_stations_response(
-        self,
-        raw: Any,
-    ) -> list[dict[str, Any]]:
-        """Parse una risposta pb_get_stations in una lista di dict normalizzati.
+    def _parse_station_list(self, raw: Any) -> list[dict[str, Any]]:
+        """Estrae la lista di stazioni (solo metadati, senza prezzi) da pb_get_stations.
 
-        La risposta è avvolta nel nome dell'endpoint:
-          {'pb_get_stations': {'status':'ok', 'stations': {'station': [...]}}}
-
-        Le stazioni possono arrivare come:
-          - {'station': [...]}  → dict con chiave 'station'
-          - [...]               → lista piatta
+        Struttura attesa:
+          {'pb_get_stations': {'stations': {'station': [{'id':..,'lat':..,'lng':..}, ...]}}}
         """
         if not isinstance(raw, dict):
             return []
 
         payload = _unwrap_response(raw)
-
-        # Estrai la lista stazioni
         stations_container = payload.get("stations")
+
         if isinstance(stations_container, dict):
-            # {'station': [...]}
-            stations_list: list = stations_container.get("station") or []
+            raw_list: list = stations_container.get("station") or []
         elif isinstance(stations_container, list):
-            stations_list = stations_container
+            raw_list = stations_container
         else:
-            stations_list = []
-            for key in ("data", "distributori", "results", "items"):
+            raw_list = []
+            for key in ("data", "results", "items"):
                 candidate = payload.get(key)
                 if isinstance(candidate, list):
-                    stations_list = candidate
+                    raw_list = candidate
                     break
 
-        if not stations_list:
+        if not raw_list:
             return []
 
-        # Log struttura primo item per debug futuro
-        if stations_list:
-            _LOGGER.debug(
-                "PrezzibenzinaClient: struttura primo item stazione: %s",
-                str(stations_list[0])[:400],
-            )
+        _LOGGER.debug(
+            "PrezzibenzinaClient: struttura primo item stazione: %s",
+            str(raw_list[0])[:400],
+        )
 
-        results: list[dict[str, Any]] = []
-        for item in stations_list:
+        result = []
+        for item in raw_list:
             if not isinstance(item, dict):
                 continue
-
             lat = _coerce_float(item.get("lat") or item.get("latitude"))
             lon = _coerce_float(item.get("lng") or item.get("lon") or item.get("longitude"))
-            if lat is None or lon is None:
+            sid = str(item.get("id") or "")
+            if lat is None or lon is None or not sid:
+                continue
+            result.append({"id": sid, "lat": lat, "lon": lon})
+        return result
+
+    def _parse_prices_response(
+        self,
+        raw: Any,
+        station_by_id: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Estrae prezzi da pb_get_prices e li abbina alle coordinate delle stazioni.
+
+        Struttura attesa (da rifinire sulla base del log raw):
+          {'pb_get_prices': {'prices': {'price': [{'station_id':..,'fuel':..,'price':..}, ...]}}}
+        oppure prezzi annidati per stazione.
+        """
+        if not isinstance(raw, dict):
+            return []
+
+        payload = _unwrap_response(raw)
+        _LOGGER.debug(
+            "PrezzibenzinaClient pb_get_prices payload keys: %s", list(payload.keys())
+        )
+
+        # Prova a trovare la lista prezzi in vari formati
+        prices_list: list = []
+        for key in ("prices", "data", "results"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                prices_list = candidate
+                break
+            if isinstance(candidate, dict):
+                # {'price': [...]} o {'prices': [...]}
+                for subkey in ("price", "prices", "items"):
+                    sub = candidate.get(subkey)
+                    if isinstance(sub, list):
+                        prices_list = sub
+                        break
+                if prices_list:
+                    break
+
+        if not prices_list:
+            return []
+
+        results: list[dict[str, Any]] = []
+        for entry in prices_list:
+            if not isinstance(entry, dict):
                 continue
 
-            prices_raw = item.get("prices") or []
-            if not isinstance(prices_raw, list):
-                prices_raw = []
+            sid = str(
+                entry.get("station_id")
+                or entry.get("stationId")
+                or entry.get("stationID")
+                or entry.get("id")
+                or ""
+            )
+            station = station_by_id.get(sid)
+            if station is None:
+                continue
 
-            for price_entry in prices_raw:
-                if not isinstance(price_entry, dict):
-                    continue
+            fuel_pb = str(
+                entry.get("fuel")
+                or entry.get("carburante")
+                or entry.get("fuelType")
+                or entry.get("fuel_type")
+                or ""
+            ).lower()
+            mimit_fuel = PB_FUEL_TO_MIMIT.get(fuel_pb)
+            if mimit_fuel is None:
+                continue
 
-                fuel_pb = (
-                    price_entry.get("fuel")
-                    or price_entry.get("carburante")
-                    or price_entry.get("fuelType")
-                    or ""
-                )
-                mimit_fuel = PB_FUEL_TO_MIMIT.get(str(fuel_pb).lower())
-                if mimit_fuel is None:
-                    continue
+            price = _coerce_float(
+                entry.get("price")
+                or entry.get("prezzo")
+                or entry.get("value")
+            )
+            if price is None or price <= 0:
+                continue
 
-                price = _coerce_float(
-                    price_entry.get("price") or price_entry.get("prezzo")
-                )
-                if price is None or price <= 0:
-                    continue
+            is_self = bool(
+                entry.get("self")
+                or entry.get("isSelf")
+                or entry.get("is_self")
+                or entry.get("self_service")
+            )
 
-                is_self = bool(
-                    price_entry.get("self")
-                    or price_entry.get("isSelf")
-                    or price_entry.get("is_self")
-                )
+            ts_raw = (
+                entry.get("update")
+                or entry.get("dtComu")
+                or entry.get("updated_at")
+                or entry.get("updatedAt")
+                or entry.get("last_updated")
+            )
 
-                ts_raw = (
-                    price_entry.get("update")
-                    or price_entry.get("dtComu")
-                    or price_entry.get("updated_at")
-                    or price_entry.get("updatedAt")
-                )
-                reported_at = _parse_timestamp(ts_raw)
-
-                results.append(
-                    {
-                        "lat": lat,
-                        "lon": lon,
-                        "fuel_type": mimit_fuel,
-                        "price": price,
-                        "is_self": is_self,
-                        "reported_at": reported_at,
-                    }
-                )
+            results.append({
+                "lat": station["lat"],
+                "lon": station["lon"],
+                "fuel_type": mimit_fuel,
+                "price": price,
+                "is_self": is_self,
+                "reported_at": _parse_timestamp(ts_raw),
+            })
 
         return results
 
@@ -356,6 +459,17 @@ class PrezzibenzinaClient:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distanza great-circle in km tra due punti WGS-84 (copia locale di geo.haversine_km)."""
+    import math
+    R = 6371.0
+    d = math.pi / 180.0
+    dlat = (lat2 - lat1) * d
+    dlon = (lon2 - lon1) * d
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1 * d) * math.cos(lat2 * d) * math.sin(dlon / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
 
 
 def _unwrap_response(raw: dict) -> dict:
