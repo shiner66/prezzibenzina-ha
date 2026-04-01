@@ -191,7 +191,8 @@ class PrezzibenzinaClient:
                         "PrezzibenzinaClient GET do=%s → HTTP %d", endpoint, resp.status
                     )
                     return None
-                return await resp.json(content_type=None)
+                raw = await resp.text()
+                return _parse_json_body(endpoint, "GET", raw)
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("PrezzibenzinaClient GET do=%s failed: %s", endpoint, exc)
             return None
@@ -214,7 +215,8 @@ class PrezzibenzinaClient:
                         "PrezzibenzinaClient POST do=%s → HTTP %d", endpoint, resp.status
                     )
                     return None
-                return await resp.json(content_type=None)
+                raw = await resp.text()
+                return _parse_json_body(endpoint, "POST", raw)
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("PrezzibenzinaClient POST do=%s failed: %s", endpoint, exc)
             return None
@@ -326,6 +328,32 @@ class PrezzibenzinaClient:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
+
+def _parse_json_body(endpoint: str, method: str, raw: str) -> dict | list | None:
+    """Tenta di parsare *raw* come JSON; logga i primi 300 caratteri se fallisce.
+
+    Separato da _try_get/_try_post_form perché aiohttp non permette di leggere
+    il body due volte: si legge con resp.text() e si parsano poi i dati qui.
+    """
+    import json  # stdlib, import locale per non appesantire il modulo
+
+    raw = raw.strip()
+    if not raw:
+        _LOGGER.debug(
+            "PrezzibenzinaClient %s do=%s: risposta vuota", method, endpoint
+        )
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        _LOGGER.debug(
+            "PrezzibenzinaClient %s do=%s: risposta non-JSON (primi 300 car): %s",
+            method,
+            endpoint,
+            raw[:300],
+        )
+        return None
 
 
 def _coerce_float(val: Any) -> float | None:
