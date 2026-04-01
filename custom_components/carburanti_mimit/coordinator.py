@@ -226,6 +226,8 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "PrezzibenzinaIT: spot-check programmato ogni %dh (intervallo dal config)",
             interval_h,
         )
+        # Esegui subito il primo fetch senza aspettare il primo tick dell'intervallo
+        self.hass.async_create_task(self._async_pb_intraday_update())
 
     def cancel_pb_intraday_refreshes(self) -> None:
         """Unsubscribe from the PrezzibenzinaIT interval trigger."""
