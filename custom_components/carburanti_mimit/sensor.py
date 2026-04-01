@@ -48,9 +48,12 @@ async def async_setup_entry(
         entities.append(CheapestPriceSensor(coordinator, entry, fuel_type))
         entities.append(AveragePriceSensor(coordinator, entry, fuel_type))
         entities.append(PriceTrendSensor(coordinator, entry, fuel_type))
-        entities.append(PricePredictionSensor(coordinator, entry, fuel_type))
+        pred = PricePredictionSensor(coordinator, entry, fuel_type)
+        insight = PriceAIInsightSensor(coordinator, entry, fuel_type)
+        pred._peer_ai_insight = insight  # direct reference, no dispatcher needed
+        entities.append(pred)
         entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
-        entities.append(PriceAIInsightSensor(coordinator, entry, fuel_type))
+        entities.append(insight)
 
     async_add_entities(entities)
 
@@ -253,6 +256,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         self._ai_risk_level: str | None = None
         self._ai_price_3d: float | None = None
         self._ai_brief: str | None = None
+        self._peer_ai_insight: PriceAIInsightSensor | None = None
 
     @property
     def available(self) -> bool:
@@ -364,8 +368,6 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         """Fetch AI geopolitical analysis and trigger a state write."""
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-        from homeassistant.helpers.dispatcher import async_dispatcher_send
-
         session = async_get_clientsession(self.hass)
         analysis, risk_level, price_3d, brief = await async_ai_prediction(
             session,
@@ -385,21 +387,17 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             self._ai_risk_level = risk_level
             self._ai_price_3d = price_3d
             self._ai_brief = brief
-            # Share results via coordinator cache so PriceAIInsightSensor can read them
-            pred = self._prediction
-            self.coordinator.ai_cache[self._fuel_type] = {
-                "analysis": analysis,
-                "risk_level": risk_level,
-                "price_3d": price_3d,
-                "brief": brief,
-                "price_tomorrow": (pred.predicted_prices[0] if pred and pred.predicted_prices else None),
-                "confidence": (pred.confidence if pred else None),
-            }
-            # Notify PriceAIInsightSensor to update
-            async_dispatcher_send(
-                self.hass,
-                f"carburanti_mimit_ai_{self._config_entry.entry_id}_{self._fuel_type}",
-            )
+            # Push results directly to peer AI insight sensor
+            if self._peer_ai_insight is not None:
+                pred = self._prediction
+                self._peer_ai_insight.update_from_ai(
+                    analysis=analysis,
+                    risk_level=risk_level,
+                    price_3d=price_3d,
+                    brief=brief,
+                    price_tomorrow=(pred.predicted_prices[0] if pred and pred.predicted_prices else None),
+                    confidence=(pred.confidence if pred else None),
+                )
             self.async_write_ha_state()
 
 
@@ -471,7 +469,7 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
     Attributes → risk level, statistical confidence, tomorrow/3d price estimates, full analysis
 
     Inherits RestoreEntity so the last AI brief survives HA restarts.
-    Updated via dispatcher signal fired by PricePredictionSensor after each AI call.
+    Updated directly by PricePredictionSensor.update_from_ai() after each AI call.
     """
 
     _attr_state_class = None
@@ -514,7 +512,7 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         }
 
     async def async_added_to_hass(self) -> None:
-        """Restore last AI state and subscribe to AI update dispatcher signal."""
+        """Restore last AI state on HA restart."""
         await super().async_added_to_hass()
 
         last_state = await self.async_get_last_state()
@@ -541,24 +539,22 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         if pred:
             self._statistical_confidence = pred.confidence
 
-        # Subscribe to AI update signal so we refresh without waiting for next coordinator cycle
-        from homeassistant.helpers.dispatcher import async_dispatcher_connect
-
-        signal = f"carburanti_mimit_ai_{self._config_entry.entry_id}_{self._fuel_type}"
-        self.async_on_remove(
-            async_dispatcher_connect(self.hass, signal, self._on_ai_update)
-        )
-
-    @callback
-    def _on_ai_update(self) -> None:
-        """Handle AI results arriving from PricePredictionSensor (sync callback for dispatcher)."""
-        ai_data = self.coordinator.ai_cache.get(self._fuel_type, {})
-        self._ai_analysis = ai_data.get("analysis")
-        self._ai_risk_level = ai_data.get("risk_level")
-        self._ai_price_3d = ai_data.get("price_3d")
-        self._ai_brief = ai_data.get("brief")
-        self._ai_price_tomorrow = ai_data.get("price_tomorrow")
-        self._statistical_confidence = ai_data.get("confidence")
+    def update_from_ai(
+        self,
+        analysis: str | None,
+        risk_level: str | None,
+        price_3d: float | None,
+        brief: str | None,
+        price_tomorrow: float | None,
+        confidence: str | None,
+    ) -> None:
+        """Called directly by PricePredictionSensor after a successful AI fetch."""
+        self._ai_analysis = analysis
+        self._ai_risk_level = risk_level
+        self._ai_price_3d = price_3d
+        self._ai_brief = brief
+        self._ai_price_tomorrow = price_tomorrow
+        self._statistical_confidence = confidence
         self.async_write_ha_state()
 
     def _handle_coordinator_update(self) -> None:
