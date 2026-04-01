@@ -17,9 +17,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import MimitApiClient
-from .const import DOMAIN, PLATFORMS
+from .const import CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES, DOMAIN, PLATFORMS
 from .coordinator import CarburantiMimitCoordinator
-from .pb_api import PrezzibenzinaClient
 from .services import async_register_services, async_unregister_services
 from .storage import HistoryStorage
 
@@ -33,7 +32,6 @@ class CarburantiMimitRuntimeData:
     coordinator: CarburantiMimitCoordinator
     client: MimitApiClient
     storage: HistoryStorage
-    pb_client: PrezzibenzinaClient
 
 
 # Type alias for typed config entries
@@ -47,12 +45,11 @@ async def async_setup_entry(
     """Set up a Carburanti MIMIT config entry."""
     session = async_get_clientsession(hass)
     client = MimitApiClient(session)
-    pb_client = PrezzibenzinaClient(session)
 
     storage = HistoryStorage(hass, entry.entry_id)
     await storage.async_load()
 
-    coordinator = CarburantiMimitCoordinator(hass, entry, client, storage, pb_client)
+    coordinator = CarburantiMimitCoordinator(hass, entry, client, storage)
 
     # Initial data fetch — raises ConfigEntryNotReady on failure
     await coordinator.async_config_entry_first_refresh()
@@ -62,7 +59,6 @@ async def async_setup_entry(
         coordinator=coordinator,
         client=client,
         storage=storage,
-        pb_client=pb_client,
     )
 
     # Forward to sensor platform
@@ -76,10 +72,9 @@ async def async_setup_entry(
 
     # Start the 08:15 Europe/Rome daily trigger
     coordinator.schedule_daily_refresh()
-    # Start the 14:30 Europe/Rome intraday spot-check via ospzApi
-    coordinator.schedule_intraday_refresh()
-    # Start PrezzibenzinaIT spot-checks (10:30 and 13:30 Europe/Rome)
-    coordinator.schedule_pb_intraday_refreshes()
+    # Start community price scraping (prezzibenzina.it HTML) if enabled
+    if entry.options.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES):
+        coordinator.schedule_community_refresh()
 
     _LOGGER.info(
         "Carburanti MIMIT entry '%s' (%s) set up successfully",
@@ -98,8 +93,7 @@ async def async_unload_entry(
     runtime = getattr(entry, "runtime_data", None)
     if runtime is not None:
         runtime.coordinator.cancel_daily_refresh()
-        runtime.coordinator.cancel_intraday_refresh()
-        runtime.coordinator.cancel_pb_intraday_refreshes()
+        runtime.coordinator.cancel_community_refresh()
 
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 

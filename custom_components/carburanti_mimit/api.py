@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 from typing import Any
 
 import aiohttp
 
 from .const import (
+    COMMUNITY_SERVICE_SELF,
+    COMMUNITY_SERVICE_USER_RPT,
+    FUEL_MAP_PB_TO_MIMIT,
     HTTP_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_VALIDATION,
-    URL_API_POSITION,
+    PB_SCRAPE_TIMEOUT_S,
+    URL_PB_STATION,
     URL_PRICES,
     URL_REGIONAL_AVERAGES,
     URL_REGISTRY,
@@ -67,33 +73,72 @@ class MimitApiClient:
             _LOGGER.debug("MIMIT connectivity check failed: %s", exc)
             return False
 
-    async def async_fetch_stations_near(
+    async def async_scrape_station_community_prices(
         self,
-        lat: float,
-        lon: float,
-        radius_km: float,
+        station_id: int,
     ) -> list[dict[str, Any]]:
-        """Search stations near a position via the unofficial REST API.
+        """Scrape community-reported prices for one station from prezzibenzina.it.
 
-        Returns the list of station dicts from the ``distributori`` key,
-        or an empty list if the API is unavailable (it is reverse-engineered
-        and may be unstable).
+        Returns a list of dicts with keys:
+            date (str), fuel (str), service (str), price (float),
+            is_self (bool), is_user_reported (bool), mimit_fuel (str | None)
+
+        Returns an empty list on any failure (network, parse, etc.).
         """
-        payload = {"lat": lat, "lon": lon, "raggio": radius_km}
+        url = URL_PB_STATION.format(station_id=station_id)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "it-IT,it;q=0.9",
+            "Cookie": "cookiebar=accepted",
+        }
+        timeout = aiohttp.ClientTimeout(total=PB_SCRAPE_TIMEOUT_S)
         try:
-            async with self._session.post(
-                URL_API_POSITION,
-                json=payload,
-                timeout=_TIMEOUT,
-            ) as resp:
+            async with self._session.get(url, headers=headers, timeout=timeout) as resp:
                 resp.raise_for_status()
-                data = await resp.json(content_type=None)
-                return data.get("distributori", []) if isinstance(data, dict) else []
+                html = await resp.text(errors="replace")
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug(
-                "MIMIT REST API unavailable (%s) — falling back to CSV-only mode", exc
-            )
+            _LOGGER.debug("PB scrape station %d failed: %s", station_id, exc)
             return []
+
+        return self._parse_community_html(html)
+
+    @staticmethod
+    def _parse_community_html(html: str) -> list[dict[str, Any]]:
+        """Extract community price rows from a prezzibenzina.it station page."""
+        rows = re.findall(
+            r'class="st_reports_row"[^>]*>\s*'
+            r'<div class="st_reports_data">([^<]+)</div>\s*'
+            r'<div class="st_reports_fuel[^"]*">([^<]+)</div>\s*'
+            r'<div class="st_reports_service">([^<]+)</div>\s*'
+            r'<div class="st_reports_price">([\d.,]+)\s*&euro;</div>',
+            html,
+        )
+        results: list[dict[str, Any]] = []
+        for date_str, fuel_raw, service_raw, price_raw in rows:
+            fuel = fuel_raw.strip()
+            service = service_raw.strip()
+            try:
+                price = float(price_raw.replace(",", "."))
+            except ValueError:
+                continue
+            if price <= 0:
+                continue
+            mimit_fuel = FUEL_MAP_PB_TO_MIMIT.get(fuel)
+            results.append({
+                "date": date_str.strip(),
+                "fuel": fuel,
+                "service": service,
+                "price": price,
+                "is_self": service in COMMUNITY_SERVICE_SELF,
+                "is_user_reported": service in COMMUNITY_SERVICE_USER_RPT,
+                "mimit_fuel": mimit_fuel,
+            })
+        return results
 
     # ------------------------------------------------------------------
     # Private helpers

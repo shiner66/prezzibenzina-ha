@@ -9,9 +9,36 @@ PLATFORMS = ["sensor"]
 # ---------------------------------------------------------------------------
 URL_PRICES = "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
 URL_REGISTRY = "https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv"
-URL_API_BASE = "https://carburanti.mise.gov.it"
-URL_API_POSITION = f"{URL_API_BASE}/ospzApi/ricerca/position"
 URL_REGIONAL_AVERAGES = "https://www.mimit.gov.it/images/stories/carburanti/MediaRegionaleStradale.csv"
+
+# ---------------------------------------------------------------------------
+# PrezzibenzinaIT — web scraping (nessuna API, prezzi pubblici)
+# ---------------------------------------------------------------------------
+URL_PB_STATION = "https://www.prezzibenzina.it/distributori/{station_id}"
+URL_PB_BRANDS = "https://www.prezzibenzina.it/www2/develop/tech/handlers/header_handler.php"
+
+PB_SCRAPE_DELAY_S = 1.0       # pausa tra richieste consecutive (cortesia)
+PB_SCRAPE_TIMEOUT_S = 10      # timeout per singola pagina stazione
+PB_MAX_STATIONS = 10          # massimo stazioni da scrapare per ciclo
+
+# Mapping: testo "service" HTML → is_self / is_user_reported
+COMMUNITY_SERVICE_SELF: frozenset[str] = frozenset({"Self service", "Self ril. utente"})
+COMMUNITY_SERVICE_USER_RPT: frozenset[str] = frozenset({"Serv. ril. utente", "Self ril. utente"})
+
+# Mapping: label carburante prezzibenzina.it → descCarburante MIMIT
+# None = carburante non gestito dall'integrazione (es. AdBlue)
+FUEL_MAP_PB_TO_MIMIT: dict[str, str | None] = {
+    "Benzina":          "Benzina",
+    "Diesel":           "Gasolio",
+    "Gasolio":          "Gasolio",
+    "Diesel speciale":  "Gasolio",
+    "Benzina speciale": "Benzina",
+    "GPL":              "GPL",
+    "Metano":           "Metano",
+    "GNL":              "Metano",
+    "HVO":              "HVO",
+    "AdBlue":           None,
+}
 
 # ---------------------------------------------------------------------------
 # Config / options keys
@@ -26,6 +53,8 @@ CONF_INCLUDE_SELF = "include_self"
 CONF_INCLUDE_SERVITO = "include_servito"
 CONF_AI_PROVIDER = "ai_provider"
 CONF_AI_API_KEY = "ai_api_key"
+CONF_USE_COMMUNITY_PRICES = "use_community_prices"
+CONF_UPDATE_INTERVAL_COMMUNITY_MIN = "update_interval_community_min"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -36,6 +65,8 @@ DEFAULT_UPDATE_INTERVAL_H = 24
 DEFAULT_FUEL_TYPES = ["Benzina", "Gasolio"]
 DEFAULT_INCLUDE_SELF = True
 DEFAULT_INCLUDE_SERVITO = True
+DEFAULT_USE_COMMUNITY_PRICES = True
+DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN = 30
 
 # ---------------------------------------------------------------------------
 # Fuel types (exactly as they appear in descCarburante column of MIMIT CSV)
@@ -111,10 +142,6 @@ SENSOR_AI_INSIGHT = "ai_insight"
 MIMIT_UPDATE_HOUR = 8
 MIMIT_UPDATE_MINUTE = 15  # 15 min after MIMIT publishes at 08:00
 
-# Intraday spot check via ospzApi (live MIMIT database, potentially fresher than 08:00 CSV)
-MIMIT_INTRADAY_HOUR = 14
-MIMIT_INTRADAY_MINUTE = 30
-
 # ---------------------------------------------------------------------------
 # Registry cache TTL
 # ---------------------------------------------------------------------------
@@ -125,51 +152,3 @@ REGISTRY_CACHE_DAYS = 7
 # ---------------------------------------------------------------------------
 HTTP_TIMEOUT_SECONDS = 30
 HTTP_TIMEOUT_VALIDATION = 10
-
-# ---------------------------------------------------------------------------
-# PrezzibenzinaIT API (reverse-engineered from Android APK, unofficial)
-# ---------------------------------------------------------------------------
-PB_API_BASE = "https://api3.prezzibenzina.it/"
-
-# Endpoint names recovered from dex symbols
-PB_ENDPOINT_GET_STATIONS = "pb_get_stations"
-PB_ENDPOINT_GET_PRICES = "pb_get_prices"
-PB_ENDPOINT_GET_SESSION_KEY = "pb_get_session_key"
-PB_ENDPOINT_CREATE_SESSION = "pb_create_session"
-PB_ENDPOINT_CHECK_SESSION = "pb_check_session"
-PB_ENDPOINT_GET_STATIONS_FROM_POLYLINE = "pb_get_stations_from_polyline"
-
-# Fake Android client metadata (sent as query/form params)
-PB_PLATFORM = "android"
-PB_APP_VERSION = "5.0.0"
-PB_SDK = "33"
-
-# Session TTL — re-create anonymous session after this many hours
-PB_SESSION_TTL_HOURS = 6
-
-# Maximum distance (km) to match a PB station to a MIMIT station
-PB_MATCH_RADIUS_KM = 0.2
-
-# Fuel name mapping: lower-cased PB fuel name → MIMIT descCarburante
-PB_FUEL_TO_MIMIT: dict[str, str] = {
-    # Benzina / unleaded
-    "benzina": FUEL_TYPE_BENZINA,
-    "gasoline": FUEL_TYPE_BENZINA,
-    "sp95": FUEL_TYPE_BENZINA,
-    "sp98": FUEL_TYPE_BENZINA,
-    "unleaded": FUEL_TYPE_BENZINA,
-    # Gasolio / diesel
-    "gasolio": FUEL_TYPE_GASOLIO,
-    "diesel": FUEL_TYPE_GASOLIO,
-    "go": FUEL_TYPE_GASOLIO,
-    # GPL / LPG
-    "gpl": FUEL_TYPE_GPL,
-    "lpg": FUEL_TYPE_GPL,
-    # Metano / CNG
-    "metano": FUEL_TYPE_METANO,
-    "methane": FUEL_TYPE_METANO,
-    "cng": FUEL_TYPE_METANO,
-    "gnc": FUEL_TYPE_METANO,
-    # HVO
-    "hvo": FUEL_TYPE_HVO,
-}

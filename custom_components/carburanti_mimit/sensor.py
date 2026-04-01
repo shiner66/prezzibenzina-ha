@@ -26,6 +26,7 @@ from .const import (
     SENSOR_PREDICTION,
     SENSOR_PREDICTION_3D,
     SENSOR_TREND,
+    URL_PB_STATION,
 )
 from .coordinator import CarburantiMimitCoordinator, FuelAreaData
 from .entity import CarburantiMimitEntity
@@ -119,6 +120,13 @@ class CheapestPriceSensor(CarburantiMimitEntity, SensorEntity):
             "full_service_cheapest": area.servito_cheapest_price,
             "stations_in_radius": area.station_count,
             "top_stations": [st.to_dict() for st in area.top_stations],
+            "community_price_self": s.community_price_self,
+            "community_price_servito": s.community_price_servito,
+            "community_updated_at": (
+                s.community_updated_at.isoformat() if s.community_updated_at else None
+            ),
+            "community_is_user_reported": s.community_is_user_reported,
+            "station_url": URL_PB_STATION.format(station_id=s.station.id),
             "last_updated": (
                 self.coordinator.data.last_updated.isoformat()
                 if self.coordinator.data

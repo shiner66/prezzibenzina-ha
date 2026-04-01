@@ -6,8 +6,6 @@ import io
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
-
 _LOGGER = logging.getLogger(__name__)
 
 # MIMIT CSV field names — anagrafica_impianti_attivi.csv
@@ -75,6 +73,10 @@ class EnrichedStation:
     is_self: bool
     reported_at: datetime
     distance_km: float = field(default=0.0)
+    community_price_self: float | None = field(default=None)
+    community_price_servito: float | None = field(default=None)
+    community_updated_at: datetime | None = field(default=None)
+    community_is_user_reported: bool = field(default=False)
 
     def to_dict(self) -> dict:
         """Serialize to a plain dict (for sensor attributes)."""
@@ -91,6 +93,10 @@ class EnrichedStation:
             "reported_at": self.reported_at.isoformat(),
             "lat": self.station.lat,
             "lon": self.station.lon,
+            "community_price_self": self.community_price_self,
+            "community_price_servito": self.community_price_servito,
+            "community_updated_at": self.community_updated_at.isoformat() if self.community_updated_at else None,
+            "community_is_user_reported": self.community_is_user_reported,
         }
 
 
@@ -276,150 +282,6 @@ def parse_regional_csv(raw_csv: str) -> dict[str, float]:
         _LOGGER.debug("Could not parse regional CSV — national averages unavailable")
 
     return result
-
-
-def parse_ospzapi_distributori(
-    distributori: list[dict[str, Any]],
-    registry: dict[int, Station],
-    user_lat: float,
-    user_lon: float,
-) -> list[EnrichedStation]:
-    """Convert the ospzApi ``distributori`` list into EnrichedStation objects.
-
-    The ospzApi is an unofficial MIMIT REST endpoint that queries the live
-    database (potentially fresher than the 08:00 CSV snapshot).  Its response
-    format has varied slightly across versions, so this parser uses multiple
-    field-name fallbacks and discards malformed entries.
-
-    Returns an empty list on total failure; partial results are returned when
-    only some entries are parseable.
-    """
-    from .geo import haversine_km  # local import to avoid circular
-
-    results: list[EnrichedStation] = []
-
-    for d in distributori:
-        if not isinstance(d, dict):
-            continue
-
-        # ---- Station ID ----
-        station_id: int | None = None
-        for id_field in ("id", "idImpianto", "idDistributore"):
-            if id_field in d:
-                try:
-                    station_id = int(d[id_field])
-                    break
-                except (ValueError, TypeError):
-                    pass
-        if station_id is None:
-            continue
-
-        # ---- Coordinates ----
-        lat: float | None = None
-        lon: float | None = None
-        for lat_field in ("lat", "latitudine"):
-            if lat_field in d:
-                try:
-                    lat = float(str(d[lat_field]).replace(",", "."))
-                    break
-                except (ValueError, TypeError):
-                    pass
-        for lon_field in ("lon", "longitudine"):
-            if lon_field in d:
-                try:
-                    lon = float(str(d[lon_field]).replace(",", "."))
-                    break
-                except (ValueError, TypeError):
-                    pass
-
-        # ---- Price list ----
-        prices_list: list[dict] | None = None
-        for pf in ("prezzo", "carburanti", "prezzi", "fuel"):
-            val = d.get(pf)
-            if isinstance(val, list):
-                prices_list = val
-                break
-        if not prices_list:
-            continue
-
-        # ---- Station object (prefer registry, fall back to inline data) ----
-        station = registry.get(station_id)
-        if station is None:
-            if lat is None or lon is None:
-                continue  # can't use without coordinates
-            station = Station(
-                id=station_id,
-                gestore=str(d.get("gestore", "")),
-                bandiera=str(d.get("bandiera", "")),
-                tipo=str(d.get("tipoImpianto", d.get("tipo", ""))),
-                nome=str(d.get("nome", f"Impianto {station_id}")),
-                indirizzo=str(d.get("indirizzo", "")),
-                comune=str(d.get("comune", "")),
-                provincia=str(d.get("provincia", "")),
-                lat=lat,
-                lon=lon,
-            )
-
-        s_lat = station.lat if station.lat else (lat or 0.0)
-        s_lon = station.lon if station.lon else (lon or 0.0)
-        distance = haversine_km(user_lat, user_lon, s_lat, s_lon) if s_lat and s_lon else 0.0
-
-        for item in prices_list:
-            if not isinstance(item, dict):
-                continue
-
-            # Fuel type
-            fuel_type: str | None = None
-            for ff in ("carburante", "descCarburante", "fuel", "tipo"):
-                if ff in item:
-                    fuel_type = str(item[ff]).strip()
-                    break
-            if not fuel_type:
-                continue
-
-            # Price value
-            price: float | None = None
-            for pf in ("prezzo", "price", "valore", "prezzo_self", "prezzo_servito"):
-                if pf in item:
-                    try:
-                        price = float(str(item[pf]).replace(",", "."))
-                        break
-                    except (ValueError, TypeError):
-                        pass
-            if price is None or price <= 0:
-                continue
-
-            # Self-service flag
-            is_self = False
-            for sf in ("self", "isSelf", "is_self", "selfService"):
-                if sf in item:
-                    val = item[sf]
-                    is_self = val in (True, 1, "1", "true", "True", "SI", "si")
-                    break
-
-            # Reported timestamp
-            reported_at = datetime.now()
-            for df in ("dtComu", "data", "dt", "reported_at", "dataOra"):
-                if df in item:
-                    try:
-                        reported_at = datetime.strptime(str(item[df]), "%d/%m/%Y %H:%M:%S")
-                        break
-                    except (ValueError, TypeError):
-                        pass
-
-            results.append(
-                EnrichedStation(
-                    station=station,
-                    fuel_type=fuel_type,
-                    price=price,
-                    is_self=is_self,
-                    reported_at=reported_at,
-                    distance_km=distance,
-                )
-            )
-
-    _LOGGER.debug("Parsed %d price records from ospzApi", len(results))
-    return results
 
 
 def merge_prices_with_registry(
