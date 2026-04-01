@@ -94,18 +94,22 @@ async def probe_endpoint(
     params: dict[str, Any],
     method: str = "GET",
 ) -> tuple[int, Any]:
-    """Hit one endpoint and return (status_code, parsed_json_or_text)."""
-    url = f"{BASE}{endpoint}"
+    """Hit one endpoint and return (status_code, parsed_json_or_text).
+
+    L'API usa il pattern RPC-over-HTTP: l'azione va nel parametro "do",
+    non nel path URL. Es: GET /?do=pb_get_stations&lat=...
+    """
+    url = BASE.rstrip("/") + "/"
     try:
         if method == "GET":
-            async with session.get(url, params=params, timeout=TIMEOUT) as resp:
+            async with session.get(url, params={"do": endpoint, **params}, timeout=TIMEOUT) as resp:
                 status = resp.status
                 try:
                     body = await resp.json(content_type=None)
                 except Exception:
                     body = await resp.text()
         else:  # POST form
-            async with session.post(url, data=params, timeout=TIMEOUT) as resp:
+            async with session.post(url, data={"do": endpoint, **params}, timeout=TIMEOUT) as resp:
                 status = resp.status
                 try:
                     body = await resp.json(content_type=None)

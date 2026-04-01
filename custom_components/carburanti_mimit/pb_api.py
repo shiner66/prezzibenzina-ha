@@ -177,21 +177,23 @@ class PrezzibenzinaClient:
         endpoint: str,
         params: dict[str, Any],
     ) -> dict | list | None:
-        url = f"{PB_API_BASE}{endpoint}"
+        # L'API è RPC-over-HTTP: l'azione va nel parametro "do", non nel path URL.
+        # GET https://api3.prezzibenzina.it/?do=pb_get_stations&lat=...
+        url = PB_API_BASE.rstrip("/") + "/"
         try:
             async with self._session.get(
                 url,
-                params=params,
+                params={"do": endpoint, **params},
                 timeout=_TIMEOUT,
             ) as resp:
                 if resp.status not in (200, 201):
                     _LOGGER.debug(
-                        "PrezzibenzinaClient GET %s → HTTP %d", endpoint, resp.status
+                        "PrezzibenzinaClient GET do=%s → HTTP %d", endpoint, resp.status
                     )
                     return None
                 return await resp.json(content_type=None)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug("PrezzibenzinaClient GET %s failed: %s", endpoint, exc)
+            _LOGGER.debug("PrezzibenzinaClient GET do=%s failed: %s", endpoint, exc)
             return None
 
     async def _try_post_form(
@@ -199,21 +201,22 @@ class PrezzibenzinaClient:
         endpoint: str,
         params: dict[str, Any],
     ) -> dict | list | None:
-        url = f"{PB_API_BASE}{endpoint}"
+        # Stessa convenzione per POST: "do" come primo campo del body form.
+        url = PB_API_BASE.rstrip("/") + "/"
         try:
             async with self._session.post(
                 url,
-                data=params,
+                data={"do": endpoint, **params},
                 timeout=_TIMEOUT,
             ) as resp:
                 if resp.status not in (200, 201):
                     _LOGGER.debug(
-                        "PrezzibenzinaClient POST %s → HTTP %d", endpoint, resp.status
+                        "PrezzibenzinaClient POST do=%s → HTTP %d", endpoint, resp.status
                     )
                     return None
                 return await resp.json(content_type=None)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug("PrezzibenzinaClient POST %s failed: %s", endpoint, exc)
+            _LOGGER.debug("PrezzibenzinaClient POST do=%s failed: %s", endpoint, exc)
             return None
 
     # ------------------------------------------------------------------
