@@ -11,6 +11,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
     AI_PROVIDER_NONE,
@@ -219,11 +220,14 @@ class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
         super()._handle_coordinator_update()
 
 
-class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
+class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
     """Predicted price for tomorrow based on 30-day history.
 
     State  → tomorrow's predicted price (float)
     Attributes → 7-day forecast, confidence, method, geopolitical AI analysis
+
+    Inherits RestoreEntity so that ai_analysis and ai_risk_level survive HA
+    restarts without waiting for the next coordinator update (08:15).
     """
 
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -283,8 +287,16 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """Compute prediction from existing history at startup, before first coordinator update."""
+        """Restore AI analysis from last state, then compute statistical prediction."""
         await super().async_added_to_hass()
+
+        # Restore AI analysis from HA state machine so it shows immediately
+        # on restart without waiting for the next coordinator update.
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.attributes:
+            self._ai_analysis = last_state.attributes.get("ai_analysis")
+            self._ai_risk_level = last_state.attributes.get("ai_risk_level")
+
         if self._prediction is None:
             history = self.coordinator._storage.get_history(self._fuel_type, days=30)
             self._prediction = compute_prediction(history, self._fuel_type)

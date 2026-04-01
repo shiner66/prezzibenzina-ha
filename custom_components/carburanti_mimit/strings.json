@@ -22,12 +22,15 @@
       },
       "advanced": {
         "title": "Impostazioni avanzate",
-        "description": "Configura il numero di distributori in classifica, l'intervallo di aggiornamento e l'AI opzionale per l'analisi delle tendenze.",
+        "description": "Configura l'intervallo di aggiornamento e l'AI opzionale per l'analisi geopolitica. Media e prezzo minimo usano sempre tutte le stazioni nel raggio.",
         "data": {
-          "top_n": "Numero di distributori in classifica",
+          "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
           "ai_provider": "Provider AI (opzionale)",
           "ai_api_key": "Chiave API AI"
+        },
+        "data_description": {
+          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
         }
       }
     },
@@ -47,10 +50,13 @@
           "fuel_types": "Tipi di carburante",
           "include_self": "Includi self-service",
           "include_servito": "Includi servito",
-          "top_n": "Numero di distributori in classifica",
+          "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
           "ai_provider": "Provider AI (opzionale)",
           "ai_api_key": "Chiave API AI"
+        },
+        "data_description": {
+          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
         }
       }
     }
