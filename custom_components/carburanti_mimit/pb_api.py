@@ -177,13 +177,12 @@ class PrezzibenzinaClient:
         endpoint: str,
         params: dict[str, Any],
     ) -> dict | list | None:
-        # L'API è RPC-over-HTTP: l'azione va nel parametro "do", non nel path URL.
-        # GET https://api3.prezzibenzina.it/?do=pb_get_stations&lat=...
+        # L'API è RPC-over-HTTP: ?do=<action>&output=json&...
         url = PB_API_BASE.rstrip("/") + "/"
         try:
             async with self._session.get(
                 url,
-                params={"do": endpoint, **params},
+                params={"do": endpoint, "output": "json", **params},
                 timeout=_TIMEOUT,
             ) as resp:
                 if resp.status not in (200, 201):
@@ -207,7 +206,7 @@ class PrezzibenzinaClient:
         try:
             async with self._session.post(
                 url,
-                data={"do": endpoint, **params},
+                data={"do": endpoint, "output": "json", **params},
                 timeout=_TIMEOUT,
             ) as resp:
                 if resp.status not in (200, 201):
