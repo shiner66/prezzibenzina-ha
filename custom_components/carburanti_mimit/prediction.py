@@ -76,6 +76,8 @@ _OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 _RISK_PATTERN = re.compile(r"\[RISCHIO:(basso|medio|alto)\]", re.IGNORECASE)
 # Pattern used to extract AI 3-day price estimate  [PREZZO_3G:1.750]
 _PRICE_3D_PATTERN = re.compile(r"\[PREZZO_3G:([\d]+[.,][\d]+)\]", re.IGNORECASE)
+# Pattern used to extract the one-line AI summary  [SINTESI:testo breve]
+_SINTESI_PATTERN = re.compile(r"\[SINTESI:([^\]]{1,200})\]", re.IGNORECASE)
 
 # Italian excise duties (accise) — updated periodically by decree
 _ACCISE = {
@@ -414,11 +416,12 @@ async def async_ai_prediction(
     geopolitical/market context for the current price; as history accumulates
     the prompt is progressively enriched with statistical indicators.
 
-    Returns ``(ai_analysis, ai_risk_level, ai_price_3d)`` or
-    ``(None, None, None)`` on error.
+    Returns ``(ai_analysis, ai_risk_level, ai_price_3d, ai_brief)`` or
+    ``(None, None, None, None)`` on error.
     - ai_analysis:    full geopolitical analysis text
     - ai_risk_level:  "basso" | "medio" | "alto" parsed from [RISCHIO:...] tag
     - ai_price_3d:    AI-estimated price in 3 days parsed from [PREZZO_3G:...] tag
+    - ai_brief:       one-sentence summary parsed from [SINTESI:...] tag
     """
     from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI  # avoid circular at top
 
@@ -430,18 +433,19 @@ async def async_ai_prediction(
         elif provider == AI_PROVIDER_OPENAI:
             text = await _call_openai(session, api_key, prompt)
         else:
-            return None, None, None
+            return None, None, None, None
 
         if not text:
-            return None, None, None
+            return None, None, None, None
 
         risk = _parse_risk_level(text)
         price_3d = _parse_price_3d(text)
-        return text.strip(), risk, price_3d
+        brief = _parse_brief(text)
+        return text.strip(), risk, price_3d, brief
 
     except Exception as exc:  # noqa: BLE001
         _LOGGER.debug("AI prediction call failed (%s) — skipping", exc)
-    return None, None, None
+    return None, None, None, None
 
 
 def _build_geopolitical_prompt(
@@ -608,6 +612,11 @@ Poi su una riga separata SOLO il tag: [PREZZO_3G:X.XXX] con il prezzo stimato in
 [Una frase sul rischio.
 Poi su una riga separata SOLO il tag: [RISCHIO:basso] oppure [RISCHIO:medio] oppure [RISCHIO:alto]]
 
+**SINTESI**:
+[Una sola frase (max 12 parole) che riassume il quadro attuale, da mostrare come stato del sensore.
+Es: "Brent stabile, OPEC+ invariato, prezzi locali in linea con media."
+Poi su una riga separata SOLO il tag: [SINTESI:testo max 12 parole]]
+
 Nessuna formula di cortesia. Solo analisi diretta e concisa."""
 
 
@@ -627,6 +636,14 @@ def _parse_price_3d(text: str) -> float | None:
             return round(float(match.group(1).replace(",", ".")), 4)
         except ValueError:
             pass
+    return None
+
+
+def _parse_brief(text: str) -> str | None:
+    """Extract the one-line AI summary from the [SINTESI:...] tag."""
+    match = _SINTESI_PATTERN.search(text)
+    if match:
+        return match.group(1).strip()
     return None
 
 

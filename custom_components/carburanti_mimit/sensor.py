@@ -20,9 +20,11 @@ from .const import (
     CONF_FUEL_TYPES,
     DEFAULT_FUEL_TYPES,
     FUEL_UNITS,
+    SENSOR_AI_INSIGHT,
     SENSOR_AVERAGE,
     SENSOR_CHEAPEST,
     SENSOR_PREDICTION,
+    SENSOR_PREDICTION_3D,
     SENSOR_TREND,
 )
 from .coordinator import CarburantiMimitCoordinator, FuelAreaData
@@ -47,6 +49,8 @@ async def async_setup_entry(
         entities.append(AveragePriceSensor(coordinator, entry, fuel_type))
         entities.append(PriceTrendSensor(coordinator, entry, fuel_type))
         entities.append(PricePredictionSensor(coordinator, entry, fuel_type))
+        entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
+        entities.append(PriceAIInsightSensor(coordinator, entry, fuel_type))
 
     async_add_entities(entities)
 
@@ -248,6 +252,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         self._ai_analysis: str | None = None
         self._ai_risk_level: str | None = None
         self._ai_price_3d: float | None = None
+        self._ai_brief: str | None = None
 
     @property
     def available(self) -> bool:
@@ -273,6 +278,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         attrs: dict[str, Any] = {
             "ai_analysis": self._ai_analysis,
             "ai_risk_level": self._ai_risk_level,
+            "ai_brief": self._ai_brief,
             "ai_predicted_price_3d": self._ai_price_3d,
         }
         if self._prediction:
@@ -299,6 +305,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         if last_state and last_state.attributes:
             self._ai_analysis = last_state.attributes.get("ai_analysis")
             self._ai_risk_level = last_state.attributes.get("ai_risk_level")
+            self._ai_brief = last_state.attributes.get("ai_brief")
             ai_3d = last_state.attributes.get("ai_predicted_price_3d")
             if ai_3d is not None:
                 try:
@@ -340,8 +347,10 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         """Fetch AI geopolitical analysis and trigger a state write."""
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+
         session = async_get_clientsession(self.hass)
-        analysis, risk_level, price_3d = await async_ai_prediction(
+        analysis, risk_level, price_3d, brief = await async_ai_prediction(
             session,
             provider,
             api_key,
@@ -353,8 +362,186 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         )
         if (analysis != self._ai_analysis
                 or risk_level != self._ai_risk_level
-                or price_3d != self._ai_price_3d):
+                or price_3d != self._ai_price_3d
+                or brief != self._ai_brief):
             self._ai_analysis = analysis
             self._ai_risk_level = risk_level
             self._ai_price_3d = price_3d
+            self._ai_brief = brief
+            # Share results via coordinator cache so PriceAIInsightSensor can read them
+            pred = self._prediction
+            self.coordinator.ai_cache[self._fuel_type] = {
+                "analysis": analysis,
+                "risk_level": risk_level,
+                "price_3d": price_3d,
+                "brief": brief,
+                "price_tomorrow": (pred.predicted_prices[0] if pred and pred.predicted_prices else None),
+                "confidence": (pred.confidence if pred else None),
+            }
+            # Notify PriceAIInsightSensor to update
+            async_dispatcher_send(
+                self.hass,
+                f"carburanti_mimit_ai_{self._config_entry.entry_id}_{self._fuel_type}",
+            )
             self.async_write_ha_state()
+
+
+# ---------------------------------------------------------------------------
+# New sensors: 3-day statistical forecast and AI insight
+# ---------------------------------------------------------------------------
+
+class PricePrediction3dSensor(CarburantiMimitEntity, SensorEntity):
+    """3-day statistical price forecast.
+
+    State  → predicted price in 3 days (float, EUR/L)
+    Attributes → confidence, method, tomorrow's statistical forecast, AI 3-day estimate
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 3
+
+    def __init__(
+        self,
+        coordinator: CarburantiMimitCoordinator,
+        config_entry: ConfigEntry,
+        fuel_type: str,
+    ) -> None:
+        super().__init__(coordinator, config_entry, fuel_type)
+        self._attr_unique_id = f"{config_entry.entry_id}_{fuel_type}_{SENSOR_PREDICTION_3D}"
+        self._attr_translation_key = SENSOR_PREDICTION_3D
+        self._attr_translation_placeholders = {"fuel_type": fuel_type}
+        self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
+        self._prediction: PredictionResult | None = None
+
+    @property
+    def native_value(self) -> float | None:
+        if not self._prediction:
+            return None
+        return self._prediction.predicted_price_3d
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = {}
+        if self._prediction:
+            attrs["confidence"] = self._prediction.confidence
+            attrs["method"] = self._prediction.method_used
+            attrs["statistical_prediction_tomorrow"] = (
+                self._prediction.predicted_prices[0]
+                if self._prediction.predicted_prices
+                else None
+            )
+        ai_data = self.coordinator.ai_cache.get(self._fuel_type, {})
+        if ai_data.get("price_3d") is not None:
+            attrs["ai_predicted_price_3d"] = ai_data["price_3d"]
+        return attrs
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self._prediction is None:
+            history = self.coordinator._storage.get_history(self._fuel_type, days=30)
+            self._prediction = compute_prediction(history, self._fuel_type)
+
+    def _handle_coordinator_update(self) -> None:
+        history = self.coordinator._storage.get_history(self._fuel_type, days=30)
+        self._prediction = compute_prediction(history, self._fuel_type)
+        super()._handle_coordinator_update()
+
+
+class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
+    """AI one-sentence summary as sensor state.
+
+    State  → brief AI summary (e.g. "Prezzi in calo per eccesso offerta OPEC+")
+    Attributes → risk level, statistical confidence, tomorrow/3d price estimates, full analysis
+
+    Inherits RestoreEntity so the last AI brief survives HA restarts.
+    Updated via dispatcher signal fired by PricePredictionSensor after each AI call.
+    """
+
+    _attr_state_class = None
+    _attr_device_class = None
+
+    def __init__(
+        self,
+        coordinator: CarburantiMimitCoordinator,
+        config_entry: ConfigEntry,
+        fuel_type: str,
+    ) -> None:
+        super().__init__(coordinator, config_entry, fuel_type)
+        self._attr_unique_id = f"{config_entry.entry_id}_{fuel_type}_{SENSOR_AI_INSIGHT}"
+        self._attr_translation_key = SENSOR_AI_INSIGHT
+        self._attr_translation_placeholders = {"fuel_type": fuel_type}
+        self._ai_brief: str | None = None
+        self._ai_risk_level: str | None = None
+        self._ai_analysis: str | None = None
+        self._ai_price_tomorrow: float | None = None
+        self._ai_price_3d: float | None = None
+        self._statistical_confidence: str | None = None
+
+    @property
+    def native_value(self) -> str | None:
+        return self._ai_brief
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "ai_risk_level": self._ai_risk_level,
+            "statistical_confidence": self._statistical_confidence,
+            "ai_predicted_tomorrow": self._ai_price_tomorrow,
+            "ai_predicted_3d": self._ai_price_3d,
+            "full_analysis": self._ai_analysis,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last AI state and subscribe to AI update dispatcher signal."""
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.attributes:
+            if last_state.state not in ("unknown", "unavailable", None):
+                self._ai_brief = last_state.state
+            self._ai_risk_level = last_state.attributes.get("ai_risk_level")
+            self._ai_analysis = last_state.attributes.get("full_analysis")
+            self._statistical_confidence = last_state.attributes.get("statistical_confidence")
+            for attr, key in [
+                ("_ai_price_tomorrow", "ai_predicted_tomorrow"),
+                ("_ai_price_3d", "ai_predicted_3d"),
+            ]:
+                val = last_state.attributes.get(key)
+                if val is not None:
+                    try:
+                        setattr(self, attr, float(val))
+                    except (ValueError, TypeError):
+                        pass
+
+        # Populate statistical confidence from current history immediately
+        history = self.coordinator._storage.get_history(self._fuel_type, days=30)
+        pred = compute_prediction(history, self._fuel_type)
+        if pred:
+            self._statistical_confidence = pred.confidence
+
+        # Subscribe to AI update signal so we refresh without waiting for next coordinator cycle
+        from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+        signal = f"carburanti_mimit_ai_{self._config_entry.entry_id}_{self._fuel_type}"
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, signal, self._on_ai_update)
+        )
+
+    async def _on_ai_update(self) -> None:
+        """Handle AI results arriving from PricePredictionSensor."""
+        ai_data = self.coordinator.ai_cache.get(self._fuel_type, {})
+        self._ai_analysis = ai_data.get("analysis")
+        self._ai_risk_level = ai_data.get("risk_level")
+        self._ai_price_3d = ai_data.get("price_3d")
+        self._ai_brief = ai_data.get("brief")
+        self._ai_price_tomorrow = ai_data.get("price_tomorrow")
+        self._statistical_confidence = ai_data.get("confidence")
+        self.async_write_ha_state()
+
+    def _handle_coordinator_update(self) -> None:
+        """Update statistical confidence on coordinator refresh."""
+        history = self.coordinator._storage.get_history(self._fuel_type, days=30)
+        pred = compute_prediction(history, self._fuel_type)
+        if pred:
+            self._statistical_confidence = pred.confidence
+        super()._handle_coordinator_update()

@@ -78,7 +78,13 @@
         }
       },
       "prediction": {
-        "name": "{fuel_type} – Previsione"
+        "name": "{fuel_type} – Previsione Domani"
+      },
+      "prediction_3d": {
+        "name": "{fuel_type} – Previsione 3 Giorni"
+      },
+      "ai_insight": {
+        "name": "{fuel_type} – Analisi AI"
       }
     }
   },

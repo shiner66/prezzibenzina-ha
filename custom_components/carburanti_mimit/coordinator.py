@@ -110,6 +110,8 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._unsub_daily: Callable[[], None] | None = None
         # Schedule intraday spot-check via ospzApi (14:30 Europe/Rome)
         self._unsub_intraday: Callable[[], None] | None = None
+        # Shared AI results cache: fuel_type → {analysis, risk_level, price_3d, brief, price_tomorrow, confidence}
+        self.ai_cache: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Public lifecycle

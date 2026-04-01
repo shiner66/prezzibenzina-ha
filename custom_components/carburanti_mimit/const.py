@@ -102,6 +102,8 @@ SENSOR_CHEAPEST = "cheapest"
 SENSOR_AVERAGE = "average"
 SENSOR_TREND = "trend"
 SENSOR_PREDICTION = "prediction"
+SENSOR_PREDICTION_3D = "prediction_3d"
+SENSOR_AI_INSIGHT = "ai_insight"
 
 # ---------------------------------------------------------------------------
 # MIMIT update time (Europe/Rome)
