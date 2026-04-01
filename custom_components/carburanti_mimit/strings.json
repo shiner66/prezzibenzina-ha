@@ -78,7 +78,7 @@
         }
       },
       "prediction": {
-        "name": "{fuel_type} – Previsione Domani"
+        "name": "{fuel_type} – Previsione (Domani)"
       },
       "prediction_3d": {
         "name": "{fuel_type} – Previsione 3 Giorni"
