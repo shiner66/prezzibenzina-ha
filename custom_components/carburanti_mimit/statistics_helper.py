@@ -34,7 +34,7 @@ def build_statistic_id(entry_id: str, fuel_type: str, metric: str) -> str:
     Format: ``carburanti_mimit:<entry8>_<fuel_slug>_<metric>``
     e.g.  ``carburanti_mimit:ab12cd34_benzina_cheapest``
     """
-    entry_prefix = entry_id[:8].replace("-", "")
+    entry_prefix = entry_id[:8].replace("-", "").lower()
     slug = _fuel_slug(fuel_type)
     return f"{STATISTICS_SOURCE}:{entry_prefix}_{slug}_{metric}"
 
@@ -96,7 +96,10 @@ async def async_push_price_statistics(
                 "Pushed statistic %s = %.4f @ %s", stat_id, cheapest_price, start
             )
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("Failed to push cheapest statistic for %s: %s", fuel_type, exc)
+            _LOGGER.warning(
+                "Failed to push cheapest statistic for %s (id=%s): %s",
+                fuel_type, stat_id, exc,
+            )
 
     if average_price is not None:
         stat_id = build_statistic_id(entry_id, fuel_type, SENSOR_AVERAGE)
@@ -112,4 +115,7 @@ async def async_push_price_statistics(
                 "Pushed statistic %s = %.4f @ %s", stat_id, average_price, start
             )
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("Failed to push average statistic for %s: %s", fuel_type, exc)
+            _LOGGER.warning(
+                "Failed to push average statistic for %s (id=%s): %s",
+                fuel_type, stat_id, exc,
+            )

@@ -313,9 +313,26 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
                 except (ValueError, TypeError):
                     pass
 
+        history = self.coordinator._storage.get_history(self._fuel_type, days=30)
         if self._prediction is None:
-            history = self.coordinator._storage.get_history(self._fuel_type, days=30)
             self._prediction = compute_prediction(history, self._fuel_type)
+
+        # If AI is configured but no cached analysis exists (e.g. first boot after
+        # installing the integration or enabling AI), fire an immediate background call
+        # rather than waiting for the next scheduled coordinator update.
+        ai_provider = self._config_entry.options.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
+        ai_key = self._config_entry.options.get(CONF_AI_API_KEY, "")
+        if ai_provider != AI_PROVIDER_NONE and ai_key and self._ai_analysis is None:
+            area = _area(self.coordinator, self._fuel_type)
+            self.hass.async_create_task(
+                self._async_fetch_ai_analysis(
+                    ai_provider,
+                    ai_key,
+                    history,
+                    area.cheapest_price if area else None,
+                    area.national_average if area else None,
+                )
+            )
 
     def _handle_coordinator_update(self) -> None:
         """Recompute prediction and optionally call AI on coordinator refresh."""
