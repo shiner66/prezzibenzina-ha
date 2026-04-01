@@ -247,6 +247,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         self._prediction: PredictionResult | None = None
         self._ai_analysis: str | None = None
         self._ai_risk_level: str | None = None
+        self._ai_price_3d: float | None = None
 
     @property
     def available(self) -> bool:
@@ -272,10 +273,12 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         attrs: dict[str, Any] = {
             "ai_analysis": self._ai_analysis,
             "ai_risk_level": self._ai_risk_level,
+            "ai_predicted_price_3d": self._ai_price_3d,
         }
         if self._prediction:
             attrs.update({
                 "predicted_7d": self._prediction.predicted_prices,
+                "predicted_price_3d": self._prediction.predicted_price_3d,
                 "confidence": self._prediction.confidence,
                 "method": self._prediction.method_used,
                 "trend_direction": self._prediction.trend_direction,
@@ -296,6 +299,12 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         if last_state and last_state.attributes:
             self._ai_analysis = last_state.attributes.get("ai_analysis")
             self._ai_risk_level = last_state.attributes.get("ai_risk_level")
+            ai_3d = last_state.attributes.get("ai_predicted_price_3d")
+            if ai_3d is not None:
+                try:
+                    self._ai_price_3d = float(ai_3d)
+                except (ValueError, TypeError):
+                    pass
 
         if self._prediction is None:
             history = self.coordinator._storage.get_history(self._fuel_type, days=30)
@@ -332,7 +341,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
         session = async_get_clientsession(self.hass)
-        analysis, risk_level = await async_ai_prediction(
+        analysis, risk_level, price_3d = await async_ai_prediction(
             session,
             provider,
             api_key,
@@ -342,7 +351,10 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             current_price=current_price,
             national_average=national_average,
         )
-        if analysis != self._ai_analysis or risk_level != self._ai_risk_level:
+        if (analysis != self._ai_analysis
+                or risk_level != self._ai_risk_level
+                or price_3d != self._ai_price_3d):
             self._ai_analysis = analysis
             self._ai_risk_level = risk_level
+            self._ai_price_3d = price_3d
             self.async_write_ha_state()
