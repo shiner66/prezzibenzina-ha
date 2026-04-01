@@ -326,14 +326,15 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         # rather than waiting for the next scheduled coordinator update.
         ai_provider = self._config_entry.options.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
         ai_key = self._config_entry.options.get(CONF_AI_API_KEY, "")
-        _LOGGER.error(
-            "DIAG async_added_to_hass %s — provider=%r key_set=%s ai_analysis_none=%s",
-            self._fuel_type,
-            ai_provider,
-            bool(ai_key),
-            self._ai_analysis is None,
+        # Trigger startup AI call if:
+        # - AI is configured, AND
+        # - either this sensor has no cached analysis, OR
+        #   the peer AI insight sensor (new entity, no saved state) has no data yet
+        insight_needs_data = (
+            self._peer_ai_insight is not None
+            and self._peer_ai_insight._ai_analysis is None
         )
-        if ai_provider != AI_PROVIDER_NONE and ai_key and self._ai_analysis is None:
+        if ai_provider != AI_PROVIDER_NONE and ai_key and (self._ai_analysis is None or insight_needs_data):
             area = _area(self.coordinator, self._fuel_type)
             self.hass.async_create_task(
                 self._async_fetch_ai_analysis(
@@ -385,14 +386,6 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             self._prediction,
             current_price=current_price,
             national_average=national_average,
-        )
-        _LOGGER.error(
-            "DIAG AI fetch done for %s — analysis=%s risk=%s brief=%s peer=%s",
-            self._fuel_type,
-            "yes" if analysis else "None",
-            risk_level,
-            brief,
-            "yes" if self._peer_ai_insight is not None else "None",
         )
         if (analysis != self._ai_analysis
                 or risk_level != self._ai_risk_level
@@ -566,10 +559,6 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         confidence: str | None,
     ) -> None:
         """Called directly by PricePredictionSensor after a successful AI fetch."""
-        _LOGGER.error(
-            "DIAG update_from_ai called for %s — brief=%s risk=%s",
-            self._fuel_type, brief, risk_level,
-        )
         self._ai_analysis = analysis
         self._ai_risk_level = risk_level
         self._ai_price_3d = price_3d
