@@ -100,6 +100,10 @@ class PrezzibenzinaClient:
         if raw is None:
             return []
 
+        _LOGGER.debug(
+            "PrezzibenzinaClient pb_get_stations risposta raw: %s",
+            str(raw)[:500],
+        )
         return self._parse_stations_response(raw)
 
     def _build_params(
@@ -155,7 +159,10 @@ class PrezzibenzinaClient:
 
         token = self._extract_token(raw_key)
         if token is None:
-            _LOGGER.debug("PrezzibenzinaClient: could not parse session token from response")
+            _LOGGER.debug(
+                "PrezzibenzinaClient: could not parse session token — risposta raw: %s",
+                str(raw_key)[:500],
+            )
             return None
 
         # Step 2 — exchange token via pb_create_session (fire-and-forget; some
