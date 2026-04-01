@@ -35,7 +35,6 @@ from .const import (
     MIMIT_INTRADAY_MINUTE,
     MIMIT_UPDATE_HOUR,
     MIMIT_UPDATE_MINUTE,
-    PB_INTRADAY_SLOTS,
     PB_MATCH_RADIUS_KM,
     REGISTRY_CACHE_DAYS,
 )
@@ -119,8 +118,8 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._unsub_daily: Callable[[], None] | None = None
         # Schedule intraday spot-check via ospzApi (14:30 Europe/Rome)
         self._unsub_intraday: Callable[[], None] | None = None
-        # PrezzibenzinaIT intraday spot-check unsubs (one per slot)
-        self._unsub_pb: list[Callable[[], None]] = []
+        # PrezzibenzinaIT interval-based unsub (single cancel function)
+        self._unsub_pb: Callable[[], None] | None = None
         # Shared AI results cache: fuel_type → {analysis, risk_level, price_3d, brief, price_tomorrow, confidence}
         self.ai_cache: dict[str, dict] = {}
 
@@ -199,47 +198,40 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsub_intraday = None
 
     def schedule_pb_intraday_refreshes(self) -> None:
-        """Register time triggers for PrezzibenzinaIT spot-checks.
+        """Register an interval-based trigger for PrezzibenzinaIT spot-checks.
 
-        Two daily slots are scheduled (see PB_INTRADAY_SLOTS in const.py).
-        Each slot independently re-schedules itself for the next day after
-        firing so that cancelling one slot does not affect the others.
+        The refresh cadence mirrors the ``update_interval_h`` option set in the
+        config flow.  If that option is, say, 4 h, PrezzibenzinaIT prices are
+        queried every 4 h and overlaid onto the MIMIT station cache so sensors
+        always show the freshest crowdsourced price available.
+
         If no PB client is available the method is a no-op.
         """
         if self._pb_client is None:
             return
         self.cancel_pb_intraday_refreshes()
-        for hour, minute in PB_INTRADAY_SLOTS:
-            self._schedule_pb_slot(hour, minute)
 
-    def _schedule_pb_slot(self, hour: int, minute: int) -> None:
-        """Register a single PB time trigger for *hour*:*minute* Rome time."""
-        tz = dt_util.get_time_zone("Europe/Rome")
-        target = datetime.now(tz).replace(
-            hour=hour, minute=minute, second=0, microsecond=0
+        interval_h: int = self._config_entry.options.get(
+            CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H
         )
 
         @callback
-        def _on_pb_time(_now: datetime) -> None:
-            _LOGGER.debug(
-                "PrezzibenzinaIT spot-check triggered at %02d:%02d Europe/Rome",
-                hour,
-                minute,
-            )
+        def _on_pb_interval(_now: datetime) -> None:
             self.hass.async_create_task(self._async_pb_intraday_update())
-            # Re-schedule this slot for tomorrow
-            self._schedule_pb_slot(hour, minute)
 
-        unsub = ha_event.async_track_point_in_time(
-            self.hass, _on_pb_time, target + timedelta(days=1)
+        self._unsub_pb = ha_event.async_track_time_interval(
+            self.hass, _on_pb_interval, timedelta(hours=interval_h)
         )
-        self._unsub_pb.append(unsub)
+        _LOGGER.info(
+            "PrezzibenzinaIT: spot-check programmato ogni %dh (intervallo dal config)",
+            interval_h,
+        )
 
     def cancel_pb_intraday_refreshes(self) -> None:
-        """Unsubscribe from all PrezzibenzinaIT time triggers."""
-        for unsub in self._unsub_pb:
-            unsub()
-        self._unsub_pb = []
+        """Unsubscribe from the PrezzibenzinaIT interval trigger."""
+        if self._unsub_pb is not None:
+            self._unsub_pb()
+            self._unsub_pb = None
 
     # ------------------------------------------------------------------
     # Core update
@@ -263,6 +255,13 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         local_stations = filter_by_radius(enriched, lat, lon, radius)
         # Keep a copy for PB intraday overlays (avoids re-fetching the CSV)
         self._enriched_cache = list(local_stations)
+
+        _LOGGER.info(
+            "MIMIT CSV: %d record prezzi nel raggio %.0f km — fonte csv_morning",
+            len(local_stations),
+            radius,
+        )
+
         data = self._compute_area_data(local_stations)
 
         # Fetch national/regional averages for context (best-effort)
@@ -303,21 +302,23 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         lon = self._config_entry.data[CONF_LONGITUDE]
         radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
 
+        _LOGGER.debug("ospzApi intraday: avvio fetch (lat=%.4f, lon=%.4f, raggio=%.0f km)", lat, lon, radius)
+
         try:
             distributori = await self._client.async_fetch_stations_near(lat, lon, radius)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug("Intraday ospzApi call failed (%s) — keeping morning CSV data", exc)
+            _LOGGER.warning("ospzApi intraday: fetch fallito (%s) — dati mattutini invariati", exc)
             return
 
         if not distributori:
-            _LOGGER.debug("Intraday ospzApi returned no stations — keeping morning CSV data")
+            _LOGGER.debug("ospzApi intraday: nessuna stazione ricevuta — dati mattutini invariati")
             return
 
         registry = self._registry_cache or {}
         enriched = parse_ospzapi_distributori(distributori, registry, lat, lon)
 
         if not enriched:
-            _LOGGER.debug("Intraday ospzApi: could not parse distributori response — keeping morning data")
+            _LOGGER.debug("ospzApi intraday: risposta non parsabile — dati mattutini invariati")
             return
 
         updated = self._compute_area_data(enriched)
@@ -327,8 +328,9 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             area.national_average = self.data.national_averages.get(fuel_type)
 
         self.async_set_updated_data(updated)
-        _LOGGER.debug(
-            "Intraday ospzApi update applied: %d fuel types refreshed",
+        _LOGGER.info(
+            "ospzApi intraday: %d stazioni elaborate, %d fuel type aggiornati",
+            len(distributori),
             len(updated.by_fuel),
         )
 
@@ -348,24 +350,75 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         lon = self._config_entry.data[CONF_LONGITUDE]
         radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
 
+        _LOGGER.debug(
+            "PrezzibenzinaIT: avvio fetch intraday (lat=%.4f, lon=%.4f, raggio=%.0f km)",
+            lat,
+            lon,
+            radius,
+        )
+
         pb_stations = await self._pb_client.async_fetch_stations_near(lat, lon, radius)
+
         if not pb_stations:
-            _LOGGER.debug(
-                "PrezzibenzinaIT intraday: no stations returned — keeping current data"
+            _LOGGER.warning(
+                "PrezzibenzinaIT: nessuna stazione ricevuta — prezzi MIMIT invariati"
             )
             return
 
-        merged = self._merge_pb_stations(pb_stations, self._enriched_cache)
+        _LOGGER.debug("PrezzibenzinaIT: %d prezzi ricevuti dall'API", len(pb_stations))
+
+        merged, matched = self._merge_pb_stations(pb_stations, self._enriched_cache)
+
+        if matched == 0:
+            _LOGGER.warning(
+                "PrezzibenzinaIT: %d prezzi ricevuti ma 0 stazioni MIMIT entro %.0f m — "
+                "verifica coordinate o PB_MATCH_RADIUS_KM",
+                len(pb_stations),
+                PB_MATCH_RADIUS_KM * 1000,
+            )
+            return
 
         updated = self._compute_area_data(merged)
         updated.data_source = "prezzibenzina_intraday"
         updated.national_averages = self.data.national_averages
+
+        # Log per-fuel price deltas at INFO so siano visibili senza debug mode
         for fuel_type, area in updated.by_fuel.items():
             area.national_average = self.data.national_averages.get(fuel_type)
+            old_area = self.data.by_fuel.get(fuel_type)
+            if old_area is None or area.cheapest_price is None:
+                continue
+            old_price = old_area.cheapest_price
+            new_price = area.cheapest_price
+            if old_price is None:
+                _LOGGER.info(
+                    "PrezzibenzinaIT [%s]: prezzo minimo disponibile → %.4f EUR",
+                    fuel_type,
+                    new_price,
+                )
+            elif new_price != old_price:
+                direction = "↑" if new_price > old_price else "↓"
+                _LOGGER.info(
+                    "PrezzibenzinaIT [%s]: prezzo minimo %s %.4f → %.4f EUR (%+.4f)",
+                    fuel_type,
+                    direction,
+                    old_price,
+                    new_price,
+                    new_price - old_price,
+                )
+            else:
+                _LOGGER.debug(
+                    "PrezzibenzinaIT [%s]: prezzo minimo invariato %.4f EUR",
+                    fuel_type,
+                    new_price,
+                )
 
         self.async_set_updated_data(updated)
-        _LOGGER.debug(
-            "PrezzibenzinaIT intraday update applied: %d fuel types refreshed",
+        _LOGGER.info(
+            "PrezzibenzinaIT: aggiornamento applicato — %d/%d prezzi su stazioni MIMIT, "
+            "%d fuel type elaborati",
+            matched,
+            len(pb_stations),
             len(updated.by_fuel),
         )
 
@@ -373,7 +426,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def _merge_pb_stations(
         pb_stations: list[dict],
         base_stations: list[EnrichedStation],
-    ) -> list[EnrichedStation]:
+    ) -> tuple[list[EnrichedStation], int]:
         """Overlay PrezzibenzinaIT prices onto MIMIT enriched station list.
 
         For each PB price point the nearest MIMIT station of the same fuel
@@ -382,6 +435,8 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         A shallow copy of each EnrichedStation is made so the original
         ``_enriched_cache`` is not mutated.
+
+        Returns a tuple of (updated_station_list, matched_count).
         """
         from copy import copy  # local import to keep top-level imports tidy
 
@@ -413,12 +468,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 best.reported_at = pb_ts
                 matched += 1
 
-        _LOGGER.debug(
-            "PrezzibenzinaIT merge: %d/%d PB prices matched to MIMIT stations",
-            matched,
-            len(pb_stations),
-        )
-        return updated
+        return updated, matched
 
     # ------------------------------------------------------------------
     # Private helpers

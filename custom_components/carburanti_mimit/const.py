@@ -146,10 +146,6 @@ PB_SDK = "33"
 # Session TTL — re-create anonymous session after this many hours
 PB_SESSION_TTL_HOURS = 6
 
-# Intraday refresh times (hour, minute) in Europe/Rome for PB spot-checks
-# These supplement the existing 14:30 ospzApi check.
-PB_INTRADAY_SLOTS: list[tuple[int, int]] = [(10, 30), (13, 30)]
-
 # Maximum distance (km) to match a PB station to a MIMIT station
 PB_MATCH_RADIUS_KM = 0.2
 
