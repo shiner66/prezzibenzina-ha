@@ -105,7 +105,28 @@ class MimitApiClient:
             _LOGGER.debug("PB scrape station %d failed: %s", station_id, exc)
             return []
 
-        return self._parse_community_html(html)
+        _LOGGER.debug(
+            "PB scrape station %d: HTTP OK, html len=%d, "
+            "has st_reports_row=%s, first 300 chars: %s",
+            station_id,
+            len(html),
+            "st_reports_row" in html,
+            html[:300].replace("\n", " "),
+        )
+
+        results = self._parse_community_html(html)
+
+        if not results and "st_reports_row" in html:
+            # Regex didn't match despite the marker being present — log a wider
+            # context around the first occurrence to diagnose the actual structure.
+            idx = html.find("st_reports_row")
+            _LOGGER.debug(
+                "PB scrape station %d: regex miss — HTML context around st_reports_row: %s",
+                station_id,
+                html[max(0, idx - 50): idx + 400].replace("\n", " "),
+            )
+
+        return results
 
     @staticmethod
     def _parse_community_html(html: str) -> list[dict[str, Any]]:
