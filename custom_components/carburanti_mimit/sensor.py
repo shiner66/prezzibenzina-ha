@@ -379,6 +379,14 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             current_price=current_price,
             national_average=national_average,
         )
+        _LOGGER.warning(
+            "AI fetch done for %s — analysis=%s risk=%s brief=%s peer=%s",
+            self._fuel_type,
+            "yes" if analysis else "None",
+            risk_level,
+            brief,
+            "yes" if self._peer_ai_insight is not None else "None",
+        )
         if (analysis != self._ai_analysis
                 or risk_level != self._ai_risk_level
                 or price_3d != self._ai_price_3d
@@ -496,9 +504,11 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
     def native_value(self) -> str | None:
         if self._ai_brief:
             return self._ai_brief
-        # Fallback: if analysis arrived but brief tag was missing, show risk level
-        if self._ai_analysis and self._ai_risk_level:
+        if self._ai_risk_level:
             return f"Rischio {self._ai_risk_level}"
+        # Last-resort fallback: if we got analysis text but tags were not parsed
+        if self._ai_analysis:
+            return self._ai_analysis[:80].replace("\n", " ").strip()
         return None
 
     @property
@@ -549,6 +559,10 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         confidence: str | None,
     ) -> None:
         """Called directly by PricePredictionSensor after a successful AI fetch."""
+        _LOGGER.warning(
+            "update_from_ai called for %s — brief=%s risk=%s",
+            self._fuel_type, brief, risk_level,
+        )
         self._ai_analysis = analysis
         self._ai_risk_level = risk_level
         self._ai_price_3d = price_3d
