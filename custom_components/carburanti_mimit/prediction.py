@@ -369,6 +369,7 @@ async def async_ai_prediction(
     fuel_type: str,
     prediction: PredictionResult | None,
     current_price: float | None = None,
+    national_average: float | None = None,
 ) -> tuple[str | None, str | None]:
     """Call an LLM for a geopolitical and market analysis of the price trend.
 
@@ -381,7 +382,7 @@ async def async_ai_prediction(
     """
     from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI  # avoid circular at top
 
-    prompt = _build_geopolitical_prompt(history, fuel_type, prediction, current_price)
+    prompt = _build_geopolitical_prompt(history, fuel_type, prediction, current_price, national_average)
 
     try:
         if provider == AI_PROVIDER_CLAUDE:
@@ -407,6 +408,7 @@ def _build_geopolitical_prompt(
     fuel_type: str,
     prediction: PredictionResult | None,
     current_price: float | None = None,
+    national_average: float | None = None,
 ) -> str:
     """Build an adaptive prompt for geopolitical + market analysis.
 
@@ -439,6 +441,25 @@ def _build_geopolitical_prompt(
         )
     else:
         price_section = f"=== CARBURANTE: {fuel_type} — data: {today} ==="
+
+    # ---- National average context ----
+    if national_average is not None:
+        ref_price = current_price or (history[-1].cheapest if history and history[-1].cheapest else None)
+        if ref_price is not None:
+            diff_pct = (ref_price - national_average) / national_average * 100
+            sign = "sopra" if diff_pct >= 0 else "sotto"
+            nat_section = (
+                f"\n=== CONTESTO NAZIONALE ===\n"
+                f"• Media nazionale {fuel_type}: {national_average:.4f} EUR/L\n"
+                f"• Prezzo locale vs media nazionale: {abs(diff_pct):.1f}% {sign} la media"
+            )
+        else:
+            nat_section = (
+                f"\n=== CONTESTO NAZIONALE ===\n"
+                f"• Media nazionale {fuel_type}: {national_average:.4f} EUR/L"
+            )
+    else:
+        nat_section = ""
 
     # ---- Statistical indicators section (only when prediction exists) ----
     if prediction is not None:
@@ -488,7 +509,7 @@ def _build_geopolitical_prompt(
 
 {price_section}
 {stats_section}
-
+{nat_section}
 === CONTESTO STAGIONALE ===
 {seasonal}
 

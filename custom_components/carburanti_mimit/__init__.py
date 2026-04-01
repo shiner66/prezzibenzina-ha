@@ -72,6 +72,8 @@ async def async_setup_entry(
 
     # Start the 08:15 Europe/Rome daily trigger
     coordinator.schedule_daily_refresh()
+    # Start the 14:30 Europe/Rome intraday spot-check via ospzApi
+    coordinator.schedule_intraday_refresh()
 
     _LOGGER.info(
         "Carburanti MIMIT entry '%s' (%s) set up successfully",
@@ -86,10 +88,11 @@ async def async_unload_entry(
     entry: CarburantiMimitConfigEntry,
 ) -> bool:
     """Unload a Carburanti MIMIT config entry."""
-    # Cancel the daily time trigger
+    # Cancel scheduled time triggers
     runtime = getattr(entry, "runtime_data", None)
     if runtime is not None:
         runtime.coordinator.cancel_daily_refresh()
+        runtime.coordinator.cancel_intraday_refresh()
 
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 

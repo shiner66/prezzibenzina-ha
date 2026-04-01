@@ -11,6 +11,7 @@ from .const import (
     HTTP_TIMEOUT_VALIDATION,
     URL_API_POSITION,
     URL_PRICES,
+    URL_REGIONAL_AVERAGES,
     URL_REGISTRY,
 )
 
@@ -41,6 +42,13 @@ class MimitApiClient:
         Raises aiohttp.ClientError on network or HTTP errors.
         """
         return await self._fetch_csv(URL_REGISTRY)
+
+    async def async_fetch_regional_csv(self) -> str:
+        """Fetch national/regional road fuel average prices CSV from MIMIT.
+
+        Returns raw CSV text. Raises aiohttp.ClientError on network errors.
+        """
+        return await self._fetch_csv(URL_REGIONAL_AVERAGES)
 
     async def async_validate_connectivity(self) -> bool:
         """Lightweight connectivity check — just tries to reach the registry URL.

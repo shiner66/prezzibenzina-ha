@@ -116,6 +116,11 @@ class CheapestPriceSensor(CarburantiMimitEntity, SensorEntity):
                 if self.coordinator.data
                 else None
             ),
+            "data_source": (
+                self.coordinator.data.data_source
+                if self.coordinator.data
+                else None
+            ),
         }
 
 
@@ -147,7 +152,16 @@ class AveragePriceSensor(CarburantiMimitEntity, SensorEntity):
         area = _area(self.coordinator, self._fuel_type)
         if not area:
             return {}
-        return {"stations_in_radius": area.station_count}
+        attrs: dict[str, Any] = {"stations_in_radius": area.station_count}
+        if area.national_average is not None:
+            attrs["national_average"] = area.national_average
+            if area.average_price is not None:
+                attrs["vs_national_pct"] = round(
+                    (area.average_price - area.national_average) / area.national_average * 100, 2
+                )
+        if self.coordinator.data:
+            attrs["data_source"] = self.coordinator.data.data_source
+        return attrs
 
 
 class PriceTrendSensor(CarburantiMimitEntity, SensorEntity):
@@ -285,8 +299,11 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         if ai_provider != AI_PROVIDER_NONE and ai_key:
             area = _area(self.coordinator, self._fuel_type)
             current_price = area.cheapest_price if area else None
+            national_average = area.national_average if area else None
             self.hass.async_create_task(
-                self._async_fetch_ai_analysis(ai_provider, ai_key, history, current_price)
+                self._async_fetch_ai_analysis(
+                    ai_provider, ai_key, history, current_price, national_average
+                )
             )
 
         super()._handle_coordinator_update()
@@ -297,6 +314,7 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
         api_key: str,
         history: list,
         current_price: float | None = None,
+        national_average: float | None = None,
     ) -> None:
         """Fetch AI geopolitical analysis and trigger a state write."""
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -310,6 +328,7 @@ class PricePredictionSensor(CarburantiMimitEntity, SensorEntity):
             self._fuel_type,
             self._prediction,
             current_price=current_price,
+            national_average=national_average,
         )
         if analysis != self._ai_analysis or risk_level != self._ai_risk_level:
             self._ai_analysis = analysis
