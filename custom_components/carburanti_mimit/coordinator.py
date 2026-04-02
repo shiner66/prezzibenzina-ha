@@ -484,7 +484,9 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # does not misfire on sparse areas.
             if len(filtered) >= 4:
                 med = median(s.price for s in filtered)
-                floor = med * 0.80
+                # 12% below median: catches fake mandatory-reporting prices while
+                # keeping real discounters (typically max 8-10% below median).
+                floor = med * 0.88
                 valid = [s for s in filtered if s.price >= floor]
                 if valid:
                     removed = len(filtered) - len(valid)
