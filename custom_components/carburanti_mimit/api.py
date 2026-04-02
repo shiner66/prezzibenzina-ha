@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import re
+from datetime import date as _Date, timedelta as _Timedelta
 from typing import Any
 
 import aiohttp
@@ -284,6 +285,7 @@ class MimitApiClient:
             mimit_fuel = FUEL_MAP_PB_TO_MIMIT.get(fuel)
             results.append({
                 "date": date_str.strip(),
+                "report_date": MimitApiClient._parse_pb_date(date_str),
                 "fuel": fuel,
                 "service": service,
                 "price": price,
@@ -292,6 +294,35 @@ class MimitApiClient:
                 "mimit_fuel": mimit_fuel,
             })
         return results
+
+    @staticmethod
+    def _parse_pb_date(date_str: str) -> _Date | None:
+        """Parse a prezzibenzina.it report date string to a Python date.
+
+        Handles:
+        - DD/MM/YYYY and DD/MM/YY (most common)
+        - "oggi" / "today"
+        - "ieri" / "yesterday"
+        - "N gg fa" / "N giorni fa" (N days ago)
+        Returns None on any parse failure.
+        """
+        s = date_str.strip().lower()
+        today = _Date.today()
+        if s in ("oggi", "today"):
+            return today
+        if s in ("ieri", "yesterday"):
+            return today - _Timedelta(days=1)
+        # "2 gg fa" or "3 giorni fa"
+        m = re.match(r"(\d+)\s*(?:gg|giorni?)\s*fa", s)
+        if m:
+            return today - _Timedelta(days=int(m.group(1)))
+        for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+            try:
+                from datetime import datetime as _dt
+                return _dt.strptime(s, fmt).date()
+            except ValueError:
+                pass
+        return None
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -343,6 +343,20 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         scraped_count = 0
         now = datetime.now(timezone.utc)
 
+        # Compute the date of the last MIMIT publish (08:00 Europe/Rome).
+        # A PB report is only a useful bridge if it post-dates that snapshot:
+        #   • If current Rome time ≥ 08:00 → last MIMIT update was today
+        #   • If current Rome time < 08:00 → last MIMIT update was yesterday
+        tz_rome = dt_util.get_time_zone("Europe/Rome")
+        now_rome = now.astimezone(tz_rome)
+        if now_rome.hour >= MIMIT_UPDATE_HOUR:
+            last_mimit_date = now_rome.date()
+        else:
+            last_mimit_date = now_rome.date() - timedelta(days=1)
+
+        # Tuple type: (price, is_user_reported, report_date | None)
+        _PBEntry = tuple  # (float, bool, date | None)
+
         for i, mimit_id in enumerate(ordered_mimit_ids):
             pb_id = mimit_to_pb[mimit_id]
             if i > 0:
@@ -352,41 +366,74 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if not prices:
                 continue
 
-            fuel_self: dict[str, tuple[float, bool]] = {}
-            fuel_servito: dict[str, tuple[float, bool]] = {}
+            # Keep the most recent (latest date) entry per fuel/service combination.
+            # If dates are equal or missing, prefer the lower price (conservative).
+            fuel_self: dict[str, _PBEntry] = {}    # mimit_fuel → (price, is_user_reported, report_date)
+            fuel_servito: dict[str, _PBEntry] = {}
             for row in prices:
                 mimit_fuel = row["mimit_fuel"]
                 if mimit_fuel is None:
                     continue
                 price: float = row["price"]
                 is_user_reported: bool = row["is_user_reported"]
-                if row["is_self"]:
-                    existing = fuel_self.get(mimit_fuel)
-                    if existing is None or price < existing[0]:
-                        fuel_self[mimit_fuel] = (price, is_user_reported)
+                report_date = row.get("report_date")  # datetime.date | None
+                entry: _PBEntry = (price, is_user_reported, report_date)
+                target = fuel_self if row["is_self"] else fuel_servito
+                existing = target.get(mimit_fuel)
+                if existing is None:
+                    target[mimit_fuel] = entry
                 else:
-                    existing = fuel_servito.get(mimit_fuel)
-                    if existing is None or price < existing[0]:
-                        fuel_servito[mimit_fuel] = (price, is_user_reported)
+                    # Prefer the entry with the more recent date; on tie prefer lower price
+                    ex_date = existing[2]
+                    if report_date is not None and (ex_date is None or report_date > ex_date):
+                        target[mimit_fuel] = entry
+                    elif report_date == ex_date and price < existing[0]:
+                        target[mimit_fuel] = entry
 
             if not fuel_self and not fuel_servito:
                 continue
 
             for enriched in mimit_station_map.get(mimit_id, []):
                 ft = enriched.fuel_type
-                self_data = fuel_self.get(ft)
+                self_data = fuel_self.get(ft)    # (price, is_user_reported, report_date) | None
                 servito_data = fuel_servito.get(ft)
                 if self_data is None and servito_data is None:
                     continue
+
                 enriched.community_price_self = self_data[0] if self_data else None
                 enriched.community_price_servito = servito_data[0] if servito_data else None
                 enriched.community_updated_at = now
                 enriched.community_is_user_reported = bool(
                     (self_data and self_data[1]) or (servito_data and servito_data[1])
                 )
-                # NOTE: MIMIT price is NOT overridden here. MIMIT is the authoritative
-                # source (mandatory official reporting). PB community prices are stored
-                # as supplementary attributes for context only.
+
+                # PB bridge: use community price as best estimate between MIMIT updates.
+                #
+                # Conditions (all must be true):
+                #   1. PB report date >= last_mimit_date: only reports that post-date the
+                #      last official MIMIT snapshot (08:00 Europe/Rome) are useful as a
+                #      bridge — older reports are already reflected in MIMIT data.
+                #   2. PB price is within ±10% of the MIMIT price (plausibility — filters
+                #      typos and outlier user reports).
+                #   3. Self-service preferred because operators apply their own markup on
+                #      full-service prices; however, both modes are bridged when a valid
+                #      report is available (self → self, servito → servito).
+                mimit_price = enriched.price
+                if mimit_price <= 0:
+                    continue
+
+                pb_candidate: _PBEntry | None = self_data if enriched.is_self else servito_data
+                if pb_candidate is not None:
+                    pb_price, _, pb_date = pb_candidate
+                    pb_recent = pb_date is not None and pb_date >= last_mimit_date
+                    pb_plausible = abs(pb_price - mimit_price) / mimit_price <= 0.10
+                    if pb_recent and pb_plausible:
+                        enriched.price = round(pb_price, 3)
+                        _LOGGER.debug(
+                            "PB bridge [%s %s]: %.3f → %.3f EUR/L (report: %s, last_mimit: %s)",
+                            enriched.station.nome, ft, mimit_price, pb_price, pb_date, last_mimit_date,
+                        )
+
             scraped_count += 1
 
         if scraped_count == 0:
