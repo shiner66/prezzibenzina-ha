@@ -7,7 +7,7 @@ from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from statistics import mean
+from statistics import mean, median
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -384,6 +384,13 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 enriched.community_is_user_reported = bool(
                     (self_data and self_data[1]) or (servito_data and servito_data[1])
                 )
+                # Override MIMIT price with the community price for this service type.
+                # Community prices are user-verified and more current than the morning CSV,
+                # so they take precedence for ranking and the sensor state value.
+                if enriched.is_self and self_data is not None:
+                    enriched.price = round(self_data[0], 3)
+                elif not enriched.is_self and servito_data is not None:
+                    enriched.price = round(servito_data[0], 3)
             scraped_count += 1
 
         if scraped_count == 0:
@@ -469,6 +476,24 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if not filtered:
                 by_fuel[fuel_type] = FuelAreaData(fuel_type=fuel_type)
                 continue
+
+            # Remove statistical outliers: prices more than 20% below the median
+            # are almost certainly fake MIMIT mandatory-reporting prices (some stations
+            # report an artificially low price to comply with the law without actually
+            # offering it).  Only applied when ≥ 4 stations are present so the filter
+            # does not misfire on sparse areas.
+            if len(filtered) >= 4:
+                med = median(s.price for s in filtered)
+                floor = med * 0.80
+                valid = [s for s in filtered if s.price >= floor]
+                if valid:
+                    removed = len(filtered) - len(valid)
+                    if removed:
+                        _LOGGER.debug(
+                            "%s: rimossi %d prezzi anomali sotto %.3f EUR/L (mediana %.3f)",
+                            fuel_type, removed, floor, med,
+                        )
+                    filtered = valid
 
             # Sort ascending by price
             filtered.sort(key=lambda s: s.price)
