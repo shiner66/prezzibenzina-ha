@@ -280,18 +280,43 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
+        """Return tomorrow's predicted price.
+
+        Priority:
+        1. Statistical model (confidence medium/high) — based on ≥14 days of history.
+        2. AI 3-day estimate — used when statistical confidence is "low" (< 14 points)
+           because the flat statistical forecast would just echo today's price and ignore
+           the AI's forward-looking geopolitical analysis.
+        3. Statistical flat forecast — last resort when AI is also unavailable.
+        """
         if not self._prediction:
             return None
         prices = self._prediction.predicted_prices
+        if self._prediction.confidence != "low":
+            # Enough history: trust the statistical model.
+            return prices[0] if prices else None
+        # Low confidence (< 14 data points): statistical prediction is flat.
+        # The AI estimate (if available) has more information — use it.
+        if self._ai_price_3d is not None:
+            return self._ai_price_3d
         return prices[0] if prices else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        # Determine which source is driving the sensor state
+        if self._prediction and self._prediction.confidence != "low":
+            prediction_source = "statistical"
+        elif self._ai_price_3d is not None:
+            prediction_source = "ai_3d_estimate"
+        else:
+            prediction_source = "statistical_flat"
+
         attrs: dict[str, Any] = {
             "ai_analysis": self._ai_analysis,
             "ai_risk_level": self._ai_risk_level,
             "ai_brief": self._ai_brief,
             "ai_predicted_price_3d": self._ai_price_3d,
+            "prediction_source": prediction_source,
         }
         if self._prediction:
             attrs.update({

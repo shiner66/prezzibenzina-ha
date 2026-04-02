@@ -83,7 +83,7 @@ class CoordinatorData:
     by_fuel: dict[str, FuelAreaData]
     last_updated: datetime
     station_count_in_radius: int
-    data_source: str = "csv_morning"  # "csv_morning" | "community_overlay"
+    data_source: str = "mimit_csv"  # "mimit_csv" | "community_overlay"
     national_averages: dict[str, float] = field(default_factory=dict)
 
 
@@ -224,7 +224,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._enriched_cache = list(local_stations)
 
         _LOGGER.info(
-            "MIMIT CSV: %d record prezzi nel raggio %.0f km — fonte csv_morning",
+            "MIMIT CSV: %d record prezzi nel raggio %.0f km",
             len(local_stations),
             radius,
         )
