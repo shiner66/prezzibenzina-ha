@@ -384,13 +384,9 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 enriched.community_is_user_reported = bool(
                     (self_data and self_data[1]) or (servito_data and servito_data[1])
                 )
-                # Override MIMIT price with the community price for this service type.
-                # Community prices are user-verified and more current than the morning CSV,
-                # so they take precedence for ranking and the sensor state value.
-                if enriched.is_self and self_data is not None:
-                    enriched.price = round(self_data[0], 3)
-                elif not enriched.is_self and servito_data is not None:
-                    enriched.price = round(servito_data[0], 3)
+                # NOTE: MIMIT price is NOT overridden here. MIMIT is the authoritative
+                # source (mandatory official reporting). PB community prices are stored
+                # as supplementary attributes for context only.
             scraped_count += 1
 
         if scraped_count == 0:
