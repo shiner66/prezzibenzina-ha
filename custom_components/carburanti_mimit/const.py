@@ -14,12 +14,16 @@ URL_REGIONAL_AVERAGES = "https://www.mimit.gov.it/images/stories/carburanti/Medi
 # ---------------------------------------------------------------------------
 # PrezzibenzinaIT — web scraping (nessuna API, prezzi pubblici)
 # ---------------------------------------------------------------------------
+URL_PB_HOMEPAGE = "https://www.prezzibenzina.it/"
 URL_PB_STATION = "https://www.prezzibenzina.it/distributori/{station_id}"
-URL_PB_BRANDS = "https://www.prezzibenzina.it/www2/develop/tech/handlers/header_handler.php"
+URL_PB_SEARCH_HANDLER = (
+    "https://www.prezzibenzina.it/www2/develop/tech/handlers/search_handler.php"
+)
 
 PB_SCRAPE_DELAY_S = 1.0       # pausa tra richieste consecutive (cortesia)
 PB_SCRAPE_TIMEOUT_S = 10      # timeout per singola pagina stazione
 PB_MAX_STATIONS = 10          # massimo stazioni da scrapare per ciclo
+PB_DISCOVERY_MATCH_KM = 0.3   # soglia GPS per abbinare stazione PB → MIMIT
 
 # Mapping: testo "service" HTML → is_self / is_user_reported
 COMMUNITY_SERVICE_SELF: frozenset[str] = frozenset({"Self service", "Self ril. utente"})

@@ -39,11 +39,12 @@ from .const import (
     DEFAULT_USE_COMMUNITY_PRICES,
     MIMIT_UPDATE_HOUR,
     MIMIT_UPDATE_MINUTE,
+    PB_DISCOVERY_MATCH_KM,
     PB_MAX_STATIONS,
     PB_SCRAPE_DELAY_S,
     REGISTRY_CACHE_DAYS,
 )
-from .geo import filter_by_radius
+from .geo import filter_by_radius, haversine_km
 from .parser import (
     EnrichedStation,
     Station,
@@ -256,10 +257,13 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _async_community_price_update(self) -> None:
         """Scrape community prices from prezzibenzina.it and overlay onto cached data.
 
-        Takes the top PB_MAX_STATIONS unique stations (by distance) from the
-        MIMIT cache, scrapes each station's page, and updates the community
-        price fields.  Fails silently — the previous data is preserved on any
-        error.
+        Flow:
+        1. Discover PB station IDs in the area via search_handler.php
+        2. Match each PB station to the nearest MIMIT station by GPS (≤ PB_DISCOVERY_MATCH_KM)
+        3. Scrape up to PB_MAX_STATIONS matched PB pages for community prices
+        4. Update EnrichedStation community fields and push to sensors
+
+        Fails silently — previous data is preserved on any error.
         """
         if self.data is None or self._enriched_cache is None:
             return
@@ -270,48 +274,92 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if not use_community:
             return
 
-        # Select top PB_MAX_STATIONS unique stations sorted by distance
-        seen_ids: set[int] = set()
-        stations_to_scrape: list[EnrichedStation] = []
-        for s in sorted(self._enriched_cache, key=lambda x: x.distance_km):
-            if s.station.id not in seen_ids:
-                seen_ids.add(s.station.id)
-                stations_to_scrape.append(s)
-            if len(stations_to_scrape) >= PB_MAX_STATIONS:
-                break
+        lat = self._config_entry.data[CONF_LATITUDE]
+        lon = self._config_entry.data[CONF_LONGITUDE]
+        radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
 
-        if not stations_to_scrape:
+        # --- 1. Discover PB station IDs in the search area ---
+        pb_stations = await self._client.async_discover_pb_stations(lat, lon, radius)
+        if not pb_stations:
+            _LOGGER.debug("Community prices: nessuna stazione PB trovata nell'area")
             return
 
-        # Build mutable copies grouped by station ID
-        updated_cache = [copy(s) for s in self._enriched_cache]
-        station_map: dict[int, list[EnrichedStation]] = {}
-        for s in updated_cache:
-            station_map.setdefault(s.station.id, []).append(s)
+        # --- 2. Build unique-per-station MIMIT index for GPS matching ---
+        # One EnrichedStation per unique station.id (pick the first fuel type found)
+        mimit_by_id: dict[int, EnrichedStation] = {}
+        for s in self._enriched_cache:
+            if s.station.id not in mimit_by_id:
+                mimit_by_id[s.station.id] = s
 
+        # --- 3. Match PB stations → MIMIT stations by GPS proximity ---
+        # pb_id → mimit_station_id (one-to-one: nearest within threshold)
+        pb_to_mimit: dict[int, int] = {}
+        for pb in pb_stations:
+            best_mimit_id: int | None = None
+            best_dist = PB_DISCOVERY_MATCH_KM + 1.0  # sentinel > threshold
+            for mimit_station in mimit_by_id.values():
+                d = haversine_km(pb["lat"], pb["lng"], mimit_station.station.lat, mimit_station.station.lon)
+                if d < best_dist:
+                    best_dist = d
+                    best_mimit_id = mimit_station.station.id
+            if best_mimit_id is not None and best_dist <= PB_DISCOVERY_MATCH_KM:
+                pb_to_mimit[pb["id"]] = best_mimit_id
+
+        if not pb_to_mimit:
+            _LOGGER.debug(
+                "Community prices: %d stazioni PB trovate ma nessun match con MIMIT entro %.0f m",
+                len(pb_stations),
+                PB_DISCOVERY_MATCH_KM * 1000,
+            )
+            return
+
+        _LOGGER.debug(
+            "Community prices: %d/%d stazioni PB abbinate a MIMIT per GPS",
+            len(pb_to_mimit),
+            len(pb_stations),
+        )
+
+        # Build mutable copies grouped by MIMIT station ID
+        updated_cache = [copy(s) for s in self._enriched_cache]
+        mimit_station_map: dict[int, list[EnrichedStation]] = {}
+        for s in updated_cache:
+            mimit_station_map.setdefault(s.station.id, []).append(s)
+
+        # Also build reverse: mimit_id → pb_id for efficient lookup
+        mimit_to_pb: dict[int, int] = {v: k for k, v in pb_to_mimit.items()}
+
+        # Select top PB_MAX_STATIONS matched stations (sorted by distance in MIMIT cache)
+        ordered_mimit_ids: list[int] = []
+        seen: set[int] = set()
+        for s in sorted(self._enriched_cache, key=lambda x: x.distance_km):
+            mid = s.station.id
+            if mid not in seen and mid in mimit_to_pb:
+                seen.add(mid)
+                ordered_mimit_ids.append(mid)
+            if len(ordered_mimit_ids) >= PB_MAX_STATIONS:
+                break
+
+        # --- 4. Scrape PB pages and apply community prices ---
         scraped_count = 0
         now = datetime.now(timezone.utc)
 
-        for i, base_station in enumerate(stations_to_scrape):
+        for i, mimit_id in enumerate(ordered_mimit_ids):
+            pb_id = mimit_to_pb[mimit_id]
             if i > 0:
                 await asyncio.sleep(PB_SCRAPE_DELAY_S)
 
-            station_id = base_station.station.id
-            prices = await self._client.async_scrape_station_community_prices(station_id)
+            prices = await self._client.async_scrape_station_community_prices(pb_id)
             if not prices:
                 continue
 
-            # For each mimit fuel type find the cheapest self and servito price
-            fuel_self: dict[str, tuple[float, bool]] = {}     # mimit_fuel -> (price, is_user_reported)
+            fuel_self: dict[str, tuple[float, bool]] = {}
             fuel_servito: dict[str, tuple[float, bool]] = {}
-
             for row in prices:
                 mimit_fuel = row["mimit_fuel"]
                 if mimit_fuel is None:
                     continue
                 price: float = row["price"]
                 is_user_reported: bool = row["is_user_reported"]
-
                 if row["is_self"]:
                     existing = fuel_self.get(mimit_fuel)
                     if existing is None or price < existing[0]:
@@ -324,7 +372,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if not fuel_self and not fuel_servito:
                 continue
 
-            for enriched in station_map.get(station_id, []):
+            for enriched in mimit_station_map.get(mimit_id, []):
                 ft = enriched.fuel_type
                 self_data = fuel_self.get(ft)
                 servito_data = fuel_servito.get(ft)
@@ -336,7 +384,6 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 enriched.community_is_user_reported = bool(
                     (self_data and self_data[1]) or (servito_data and servito_data[1])
                 )
-
             scraped_count += 1
 
         if scraped_count == 0:
@@ -352,9 +399,9 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._enriched_cache = updated_cache
         self.async_set_updated_data(updated)
         _LOGGER.info(
-            "Community prices: aggiornamento applicato da %d/%d stazioni scrappate",
+            "Community prices: aggiornamento applicato da %d/%d stazioni PB abbinate",
             scraped_count,
-            len(stations_to_scrape),
+            len(ordered_mimit_ids),
         )
 
     # ------------------------------------------------------------------

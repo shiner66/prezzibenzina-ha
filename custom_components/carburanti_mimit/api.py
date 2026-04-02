@@ -1,9 +1,10 @@
 """HTTP client for MIMIT fuel price data."""
 from __future__ import annotations
 
+import json
 import logging
+import math
 import re
-from datetime import datetime
 from typing import Any
 
 import aiohttp
@@ -15,6 +16,8 @@ from .const import (
     HTTP_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_VALIDATION,
     PB_SCRAPE_TIMEOUT_S,
+    URL_PB_HOMEPAGE,
+    URL_PB_SEARCH_HANDLER,
     URL_PB_STATION,
     URL_PRICES,
     URL_REGIONAL_AVERAGES,
@@ -72,6 +75,129 @@ class MimitApiClient:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("MIMIT connectivity check failed: %s", exc)
             return False
+
+    async def async_fetch_pb_haproxy_cookie(self) -> str | None:
+        """GET the PB homepage and return the ``_haproxy`` cookie value.
+
+        The search_handler.php endpoint requires this load-balancer session
+        cookie to return data (returns empty body without it).
+
+        Returns None on any failure; the discovery call degrades gracefully.
+        """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "text/html",
+            "Cookie": "cookiebar=accepted",
+        }
+        timeout = aiohttp.ClientTimeout(total=PB_SCRAPE_TIMEOUT_S)
+        try:
+            async with self._session.get(
+                URL_PB_HOMEPAGE, headers=headers, timeout=timeout, allow_redirects=True
+            ) as resp:
+                resp.raise_for_status()
+                cookie = resp.cookies.get("_haproxy")
+                if cookie:
+                    return cookie.value
+                # Also check the session-level jar (aiohttp stores them there)
+                jar_cookies = self._session.cookie_jar.filter_cookies(URL_PB_HOMEPAGE)
+                haproxy = jar_cookies.get("_haproxy")
+                return haproxy.value if haproxy else None
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("PB homepage cookie fetch failed: %s", exc)
+            return None
+
+    async def async_discover_pb_stations(
+        self,
+        lat: float,
+        lon: float,
+        radius_km: float,
+    ) -> list[dict[str, Any]]:
+        """Discover PB station IDs within a bounding box using search_handler.php.
+
+        Returns a list of dicts with keys: id (int), lat (float), lng (float), brand (str).
+        Returns an empty list on any failure.
+
+        PB uses its own station IDs (different from MIMIT).  Callers should
+        match returned stations to MIMIT stations by GPS proximity.
+        """
+        haproxy = await self.async_fetch_pb_haproxy_cookie()
+
+        lat_delta = radius_km / 111.0
+        lon_delta = radius_km / (111.0 * math.cos(math.radians(lat)))
+
+        params = {
+            "sel": "getStations",
+            "min_lat": f"{lat - lat_delta:.6f}",
+            "min_long": f"{lon - lon_delta:.6f}",
+            "max_lat": f"{lat + lat_delta:.6f}",
+            "max_long": f"{lon + lon_delta:.6f}",
+            "compact": "1",
+        }
+        cookie_parts = ["cookiebar=accepted"]
+        if haproxy:
+            cookie_parts.append(f"_haproxy={haproxy}")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "application/json, text/javascript, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": URL_PB_HOMEPAGE,
+            "Cookie": "; ".join(cookie_parts),
+        }
+        timeout = aiohttp.ClientTimeout(total=PB_SCRAPE_TIMEOUT_S)
+        try:
+            async with self._session.get(
+                URL_PB_SEARCH_HANDLER, params=params, headers=headers, timeout=timeout
+            ) as resp:
+                resp.raise_for_status()
+                raw = await resp.text()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("PB discovery request failed: %s", exc)
+            return []
+
+        if not raw or not raw.strip():
+            _LOGGER.debug(
+                "PB discovery: empty response (haproxy cookie: %s)",
+                "present" if haproxy else "missing",
+            )
+            return []
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _LOGGER.debug("PB discovery: JSON parse failed (%s) — raw: %s", exc, raw[:200])
+            return []
+
+        if not isinstance(data, list):
+            _LOGGER.debug("PB discovery: unexpected response type %s", type(data))
+            return []
+
+        results: list[dict[str, Any]] = []
+        for item in data:
+            try:
+                results.append({
+                    "id": int(item["id"]),
+                    "lat": float(item["lat"]),
+                    "lng": float(item["lng"]),
+                    "brand": str(item.get("brand", "")),
+                })
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        _LOGGER.debug(
+            "PB discovery: %d stazioni trovate nel raggio %.0f km",
+            len(results),
+            radius_km,
+        )
+        return results
 
     async def async_scrape_station_community_prices(
         self,
