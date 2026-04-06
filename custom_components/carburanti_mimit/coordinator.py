@@ -37,6 +37,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN,
     DEFAULT_UPDATE_INTERVAL_H,
     DEFAULT_USE_COMMUNITY_PRICES,
+    FUEL_ID_TO_MIMIT,
     MIMIT_UPDATE_HOUR,
     MIMIT_UPDATE_MINUTE,
     PB_DISCOVERY_MATCH_KM,
@@ -83,7 +84,7 @@ class CoordinatorData:
     by_fuel: dict[str, FuelAreaData]
     last_updated: datetime
     station_count_in_radius: int
-    data_source: str = "mimit_csv"  # "mimit_csv" | "community_overlay"
+    data_source: str = "mimit_csv"  # "mimit_csv" | "mimit_intraday" | "community_overlay"
     national_averages: dict[str, float] = field(default_factory=dict)
 
 
@@ -115,6 +116,11 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Full list of enriched stations inside the radius — kept between
         # updates so community overlays can re-use them without re-fetching.
         self._enriched_cache: list[EnrichedStation] | None = None
+
+        # Timestamp of the last successful MIMIT CSV fetch (UTC).
+        # Used by the intraday MIMIT update to decide whether zone API prices
+        # are fresher than what we already have from the CSV snapshot.
+        self._mimit_csv_fetched_at: datetime | None = None
 
         # Schedule daily refresh at MIMIT publish time (08:15 Europe/Rome)
         self._unsub_daily: Callable[[], None] | None = None
@@ -163,18 +169,15 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._unsub_daily = None
 
     def schedule_community_refresh(self) -> None:
-        """Register an interval-based trigger for community price scraping.
+        """Register an interval-based trigger for intraday price updates.
 
-        Scrapes prezzibenzina.it pages for the top PB_MAX_STATIONS nearest
-        stations and overlays crowdsourced prices onto the MIMIT cache.
-        If ``use_community_prices`` is False this is a no-op.
+        Two update sources run sequentially on each tick:
+        1. MIMIT OsservaPrezzi real-time API (``/ospzApi/search/zone``) — always
+           active; reflects official station price changes within 6 h.
+        2. prezzibenzina.it community scraping — optional, enabled by
+           ``use_community_prices``; fills gaps where MIMIT hasn't been updated
+           yet by crowdsourcing recent pump prices.
         """
-        use_community = self._config_entry.options.get(
-            CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
-        )
-        if not use_community:
-            return
-
         self.cancel_community_refresh()
 
         interval_min: int = self._config_entry.options.get(
@@ -182,17 +185,22 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
 
         @callback
-        def _on_community_interval(_now: datetime) -> None:
-            self.hass.async_create_task(self._async_community_price_update())
+        def _on_intraday_interval(_now: datetime) -> None:
+            self.hass.async_create_task(self._async_refresh_intraday())
 
         self._unsub_community = ha_event.async_track_time_interval(
-            self.hass, _on_community_interval, timedelta(minutes=interval_min)
+            self.hass, _on_intraday_interval, timedelta(minutes=interval_min)
         )
         _LOGGER.info(
-            "Community prices: aggiornamento programmato ogni %d minuti", interval_min
+            "Aggiornamento intraday programmato ogni %d minuti "
+            "(MIMIT zone API + %s)",
+            interval_min,
+            "PB community" if self._config_entry.options.get(
+                CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
+            ) else "solo MIMIT",
         )
         # Run immediately on first setup so sensors show fresh prices right away
-        self.hass.async_create_task(self._async_community_price_update())
+        self.hass.async_create_task(self._async_refresh_intraday())
 
     def cancel_community_refresh(self) -> None:
         """Unsubscribe from the community price interval trigger."""
@@ -211,6 +219,11 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             prices_csv = await self._client.async_fetch_prices_csv()
         except aiohttp.ClientError as exc:
             raise UpdateFailed(f"MIMIT network error: {exc}") from exc
+
+        # Record the moment the CSV was successfully fetched so that the
+        # intraday MIMIT update can determine which zone API timestamps are
+        # genuinely newer than the daily snapshot.
+        self._mimit_csv_fetched_at = datetime.now(timezone.utc)
 
         prices = parse_prices_csv(prices_csv)
         enriched = merge_prices_with_registry(prices, registry)
@@ -253,6 +266,139 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
         return data
+
+    async def _async_refresh_intraday(self) -> None:
+        """Orchestrate one intraday refresh cycle.
+
+        Runs in order:
+        1. MIMIT zone API (authoritative official prices, intraday resolution)
+        2. PB community scraping (crowdsourced fallback, if enabled)
+
+        Running them sequentially ensures that the PB bridge operates on
+        top of the already-updated MIMIT intraday prices, so the ±10%
+        plausibility check is applied against the freshest official data.
+        """
+        await self._async_intraday_mimit_update()
+
+        use_community = self._config_entry.options.get(
+            CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
+        )
+        if use_community:
+            await self._async_community_price_update()
+
+    async def _async_intraday_mimit_update(self) -> None:
+        """Overlay intraday MIMIT prices from the OsservaPrezzi zone API.
+
+        The ``/ospzApi/search/zone`` endpoint returns the current price for
+        each station with an ``insertDate`` timestamp.  Stations are legally
+        required to report price changes within 6 hours, so this reflects
+        real-time updates between the daily 8am CSV snapshots.
+
+        Only prices whose ``insertDate`` is strictly later than
+        ``_mimit_csv_fetched_at`` are applied — earlier timestamps mean the
+        price was already captured by the morning CSV.
+
+        Fails silently so the daily CSV data is always preserved.
+        """
+        if self.data is None or self._enriched_cache is None:
+            return
+
+        lat = self._config_entry.data[CONF_LATITUDE]
+        lon = self._config_entry.data[CONF_LONGITUDE]
+        radius = self._config_entry.options.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)
+
+        zone_results = await self._client.async_fetch_zone_prices(lat, lon, radius)
+        if not zone_results:
+            _LOGGER.debug("MIMIT intraday: nessun risultato dalla zone API")
+            return
+
+        # Build map: station_id → {(mimit_fuel, is_self): (price, insert_date)}
+        # Filter by configured radius (zone API doesn't enforce it strictly).
+        zone_map: dict[int, dict[tuple[str, bool], tuple[float, datetime]]] = {}
+        for item in zone_results:
+            if item["distance_km"] > radius:
+                continue
+            sid: int = item["station_id"]
+            insert_date: datetime | None = item["insert_date"]
+            fuel_prices: dict[tuple[str, bool], tuple[float, datetime]] = {}
+            for fuel in item["fuels"]:
+                mimit_fuel = FUEL_ID_TO_MIMIT.get(fuel["fuel_id"])
+                if mimit_fuel is None:
+                    continue
+                key = (mimit_fuel, fuel["is_self"])
+                existing = fuel_prices.get(key)
+                if existing is None:
+                    fuel_prices[key] = (fuel["price"], insert_date)
+                else:
+                    # When multiple fuelIds map to the same type (e.g., Gasolio
+                    # and Blue Diesel both → "Gasolio"), prefer the lower-fuelId
+                    # entry (standard variant) — already assigned first since
+                    # standard IDs {1,2,3,4} are lowest; keep as-is.
+                    pass
+            zone_map[sid] = fuel_prices
+
+        if not zone_map:
+            _LOGGER.debug(
+                "MIMIT intraday: nessuna stazione zone API entro %.0f km", radius
+            )
+            return
+
+        # Apply prices to a mutable copy of the enriched cache
+        updated_cache = [copy(s) for s in self._enriched_cache]
+        update_count = 0
+        csv_ts = self._mimit_csv_fetched_at  # may be None on first boot
+
+        for enriched in updated_cache:
+            sid = enriched.station.id
+            prices_for_station = zone_map.get(sid)
+            if not prices_for_station:
+                continue
+            key = (enriched.fuel_type, enriched.is_self)
+            entry = prices_for_station.get(key)
+            if entry is None:
+                continue
+            zone_price, zone_insert_date = entry
+
+            # Only override when the zone API timestamp is strictly newer than
+            # the CSV snapshot so we don't regress to stale API data on boot.
+            if csv_ts is not None and zone_insert_date is not None:
+                if zone_insert_date <= csv_ts:
+                    continue
+
+            new_price = round(zone_price, 3)
+            if new_price != round(enriched.price, 3):
+                _LOGGER.debug(
+                    "MIMIT intraday [%s %s %s]: %.3f → %.3f EUR/L (API ts: %s)",
+                    enriched.station.nome,
+                    enriched.fuel_type,
+                    "self" if enriched.is_self else "servito",
+                    enriched.price,
+                    new_price,
+                    zone_insert_date,
+                )
+                enriched.price = new_price
+                update_count += 1
+
+        if update_count == 0:
+            _LOGGER.debug(
+                "MIMIT intraday: %d stazioni zone API, nessun prezzo cambiato rispetto al CSV",
+                len(zone_map),
+            )
+            return
+
+        updated = self._compute_area_data(updated_cache)
+        updated.data_source = "mimit_intraday"
+        updated.national_averages = self.data.national_averages
+        for fuel_type, area in updated.by_fuel.items():
+            area.national_average = self.data.national_averages.get(fuel_type)
+
+        self._enriched_cache = updated_cache
+        self.async_set_updated_data(updated)
+        _LOGGER.info(
+            "MIMIT intraday: %d prezzi aggiornati da zone API (%d stazioni nell'area)",
+            update_count,
+            len(zone_map),
+        )
 
     async def _async_community_price_update(self) -> None:
         """Scrape community prices from prezzibenzina.it and overlay onto cached data.

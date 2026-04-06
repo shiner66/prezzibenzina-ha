@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import re
-from datetime import date as _Date, timedelta as _Timedelta
+from datetime import date as _Date, datetime as _Datetime, timedelta as _Timedelta, timezone as _TZ
 from typing import Any
 
 import aiohttp
@@ -17,6 +17,7 @@ from .const import (
     HTTP_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_VALIDATION,
     PB_SCRAPE_TIMEOUT_S,
+    URL_OSPZ_SEARCH_ZONE,
     URL_PB_HOMEPAGE,
     URL_PB_SEARCH_HANDLER,
     URL_PB_STATION,
@@ -59,6 +60,94 @@ class MimitApiClient:
         Returns raw CSV text. Raises aiohttp.ClientError on network errors.
         """
         return await self._fetch_csv(URL_REGIONAL_AVERAGES)
+
+    async def async_fetch_zone_prices(
+        self, lat: float, lon: float, radius_km: float
+    ) -> list[dict[str, Any]]:
+        """Fetch intraday prices from the MIMIT OsservaPrezzi real-time API.
+
+        Uses POST /ospzApi/search/zone which reflects price changes as soon as
+        stations report them (legal obligation: within 6 h of any change).
+
+        Returns a list of dicts::
+
+            {
+                "station_id": int,          # MIMIT idImpianto (matches CSV)
+                "location": {"lat": float, "lng": float},
+                "brand": str,
+                "distance_km": float,       # distance from query point (km)
+                "insert_date": datetime,    # UTC-aware timestamp of last update
+                "fuels": [
+                    {
+                        "fuel_id": int,
+                        "name": str,
+                        "is_self": bool,
+                        "price": float,
+                    }
+                ],
+            }
+
+        Returns an empty list on any network or parse failure.
+        """
+        body: dict[str, Any] = {
+            "priceOrder": "asc",
+            "points": [{"lat": lat, "lng": lon}],
+            "radius": radius_km * 1000,  # metres; server may cap internally
+        }
+        try:
+            async with self._session.post(
+                URL_OSPZ_SEARCH_ZONE,
+                json=body,
+                timeout=_TIMEOUT,
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Zone prices fetch failed: %s", exc)
+            return []
+
+        results: list[dict[str, Any]] = []
+        for item in data.get("results", []):
+            raw_date = item.get("insertDate")
+            insert_dt: _Datetime | None = None
+            if raw_date:
+                try:
+                    insert_dt = _Datetime.fromisoformat(raw_date)
+                    if insert_dt.tzinfo is None:
+                        insert_dt = insert_dt.replace(tzinfo=_TZ.utc)
+                    else:
+                        insert_dt = insert_dt.astimezone(_TZ.utc)
+                except ValueError:
+                    pass
+
+            try:
+                distance_km = float(item.get("distance", 0))
+            except (ValueError, TypeError):
+                distance_km = 0.0
+
+            fuels: list[dict[str, Any]] = []
+            for f in item.get("fuels", []):
+                fuels.append(
+                    {
+                        "fuel_id": int(f.get("fuelId", 0)),
+                        "name": f.get("name", ""),
+                        "is_self": bool(f.get("isSelf", False)),
+                        "price": float(f.get("price", 0)),
+                    }
+                )
+
+            results.append(
+                {
+                    "station_id": int(item["id"]),
+                    "location": item.get("location") or {},
+                    "brand": item.get("brand") or "",
+                    "distance_km": distance_km,
+                    "insert_date": insert_dt,
+                    "fuels": fuels,
+                }
+            )
+
+        return results
 
     async def async_validate_connectivity(self) -> bool:
         """Lightweight connectivity check — just tries to reach the registry URL.

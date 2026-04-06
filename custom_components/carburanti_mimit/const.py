@@ -11,6 +11,11 @@ URL_PRICES = "https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv"
 URL_REGISTRY = "https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv"
 URL_REGIONAL_AVERAGES = "https://www.mimit.gov.it/images/stories/carburanti/MediaRegionaleStradale.csv"
 
+# MIMIT OsservaPrezzi real-time API (carburanti.mise.gov.it/ospzApi)
+# Stations are legally required to update within 6 h of a price change;
+# this endpoint reflects those updates immediately (intraday).
+URL_OSPZ_SEARCH_ZONE = "https://carburanti.mise.gov.it/ospzApi/search/zone"
+
 # ---------------------------------------------------------------------------
 # PrezzibenzinaIT — web scraping (nessuna API, prezzi pubblici)
 # ---------------------------------------------------------------------------
@@ -28,6 +33,19 @@ PB_DISCOVERY_MATCH_KM = 0.3   # soglia GPS per abbinare stazione PB → MIMIT
 # Mapping: testo "service" HTML → is_self / is_user_reported
 COMMUNITY_SERVICE_SELF: frozenset[str] = frozenset({"Self service", "Self ril. utente"})
 COMMUNITY_SERVICE_USER_RPT: frozenset[str] = frozenset({"Serv. ril. utente", "Self ril. utente"})
+
+# Mapping: ospzApi fuelId → integration fuel type name (None = skip)
+# Only standard fuel IDs are mapped; premium/brand variants (Blue Diesel,
+# Supreme Diesel, etc.) are intentionally excluded to avoid overwriting
+# the standard Gasolio/Benzina entry with a brand-specific variant price.
+FUEL_ID_TO_MIMIT: dict[int, str | None] = {
+    1: "Benzina",
+    2: "Gasolio",
+    3: "Metano",
+    4: "GPL",
+    394: "HVO",   # HVOlution (ENI HVO diesel)
+    424: "HVO",   # HVO (generic)
+}
 
 # Mapping: label carburante prezzibenzina.it → descCarburante MIMIT
 # None = carburante non gestito dall'integrazione (es. AdBlue)
