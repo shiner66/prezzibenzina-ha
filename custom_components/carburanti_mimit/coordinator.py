@@ -220,10 +220,26 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except aiohttp.ClientError as exc:
             raise UpdateFailed(f"MIMIT network error: {exc}") from exc
 
-        # Record the moment the CSV was successfully fetched so that the
-        # intraday MIMIT update can determine which zone API timestamps are
-        # genuinely newer than the daily snapshot.
-        self._mimit_csv_fetched_at = datetime.now(timezone.utc)
+        # Record the MIMIT CSV data cutoff time (08:00 Europe/Rome today, or
+        # yesterday if we haven't reached 08:00 yet).  This is used by the
+        # intraday zone API update to compare against insertDate timestamps.
+        #
+        # We use the MIMIT *publish* time (08:00), NOT datetime.now(), so that
+        # if HA is restarted at 14:00 and fetches a CSV with 08:00 data, zone
+        # API prices with insertDate=10:00 are still correctly recognised as
+        # newer (10:00 > 08:00) rather than wrongly discarded (10:00 < 14:00).
+        tz_rome = dt_util.get_time_zone("Europe/Rome")
+        now_rome = datetime.now(tz_rome)
+        if now_rome.hour >= MIMIT_UPDATE_HOUR:
+            mimit_cutoff_rome = now_rome.replace(
+                hour=MIMIT_UPDATE_HOUR, minute=0, second=0, microsecond=0
+            )
+        else:
+            yesterday_rome = now_rome - timedelta(days=1)
+            mimit_cutoff_rome = yesterday_rome.replace(
+                hour=MIMIT_UPDATE_HOUR, minute=0, second=0, microsecond=0
+            )
+        self._mimit_csv_fetched_at = mimit_cutoff_rome.astimezone(timezone.utc)
 
         prices = parse_prices_csv(prices_csv)
         enriched = merge_prices_with_registry(prices, registry)
