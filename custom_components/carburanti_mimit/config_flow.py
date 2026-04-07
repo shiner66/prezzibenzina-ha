@@ -24,13 +24,17 @@ from .const import (
     CONF_LONGITUDE,
     CONF_RADIUS_KM,
     CONF_TOP_N,
+    CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
     CONF_UPDATE_INTERVAL_H,
+    CONF_USE_COMMUNITY_PRICES,
     DEFAULT_FUEL_TYPES,
     DEFAULT_INCLUDE_SELF,
     DEFAULT_INCLUDE_SERVITO,
     DEFAULT_RADIUS_KM,
     DEFAULT_TOP_N,
+    DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN,
     DEFAULT_UPDATE_INTERVAL_H,
+    DEFAULT_USE_COMMUNITY_PRICES,
     DOMAIN,
 )
 
@@ -151,6 +155,12 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._options[CONF_UPDATE_INTERVAL_H] = int(user_input[CONF_UPDATE_INTERVAL_H])
             self._options[CONF_AI_PROVIDER] = user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
             self._options[CONF_AI_API_KEY] = user_input.get(CONF_AI_API_KEY, "")
+            self._options[CONF_USE_COMMUNITY_PRICES] = user_input.get(
+                CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
+            )
+            self._options[CONF_UPDATE_INTERVAL_COMMUNITY_MIN] = int(
+                user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
+            )
 
             title = self._options.pop("entry_title", "Carburanti")
             return self.async_create_entry(
@@ -166,6 +176,15 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Required(CONF_UPDATE_INTERVAL_H, default=DEFAULT_UPDATE_INTERVAL_H): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=24, step=1, mode="slider", unit_of_measurement="h")
+                ),
+                vol.Required(
+                    CONF_USE_COMMUNITY_PRICES, default=DEFAULT_USE_COMMUNITY_PRICES
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
+                    default=DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=5, max=60, step=5, mode="slider", unit_of_measurement="min")
                 ),
                 vol.Optional(CONF_AI_PROVIDER, default=AI_PROVIDER_NONE): selector.SelectSelector(
                     selector.SelectSelectorConfig(
@@ -220,6 +239,12 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                     CONF_INCLUDE_SERVITO: user_input[CONF_INCLUDE_SERVITO],
                     CONF_TOP_N: int(user_input[CONF_TOP_N]),
                     CONF_UPDATE_INTERVAL_H: int(user_input[CONF_UPDATE_INTERVAL_H]),
+                    CONF_USE_COMMUNITY_PRICES: user_input.get(
+                        CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
+                    ),
+                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN: int(
+                        user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
+                    ),
                     CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
                     CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
                 },
@@ -243,6 +268,16 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 ),
                 vol.Required(CONF_UPDATE_INTERVAL_H, default=opts.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H)): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=24, step=1, mode="slider", unit_of_measurement="h")
+                ),
+                vol.Required(
+                    CONF_USE_COMMUNITY_PRICES,
+                    default=opts.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
+                    default=opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=5, max=60, step=5, mode="slider", unit_of_measurement="min")
                 ),
                 vol.Optional(CONF_AI_PROVIDER, default=opts.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)): selector.SelectSelector(
                     selector.SelectSelectorConfig(

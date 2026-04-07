@@ -1,15 +1,26 @@
 """HTTP client for MIMIT fuel price data."""
 from __future__ import annotations
 
+import json
 import logging
+import math
+import re
+from datetime import date as _Date, datetime as _Datetime, timedelta as _Timedelta, timezone as _TZ
 from typing import Any
 
 import aiohttp
 
 from .const import (
+    COMMUNITY_SERVICE_SELF,
+    COMMUNITY_SERVICE_USER_RPT,
+    FUEL_MAP_PB_TO_MIMIT,
     HTTP_TIMEOUT_SECONDS,
     HTTP_TIMEOUT_VALIDATION,
-    URL_API_POSITION,
+    PB_SCRAPE_TIMEOUT_S,
+    URL_OSPZ_SEARCH_ZONE,
+    URL_PB_HOMEPAGE,
+    URL_PB_SEARCH_HANDLER,
+    URL_PB_STATION,
     URL_PRICES,
     URL_REGIONAL_AVERAGES,
     URL_REGISTRY,
@@ -50,6 +61,94 @@ class MimitApiClient:
         """
         return await self._fetch_csv(URL_REGIONAL_AVERAGES)
 
+    async def async_fetch_zone_prices(
+        self, lat: float, lon: float, radius_km: float
+    ) -> list[dict[str, Any]]:
+        """Fetch intraday prices from the MIMIT OsservaPrezzi real-time API.
+
+        Uses POST /ospzApi/search/zone which reflects price changes as soon as
+        stations report them (legal obligation: within 6 h of any change).
+
+        Returns a list of dicts::
+
+            {
+                "station_id": int,          # MIMIT idImpianto (matches CSV)
+                "location": {"lat": float, "lng": float},
+                "brand": str,
+                "distance_km": float,       # distance from query point (km)
+                "insert_date": datetime,    # UTC-aware timestamp of last update
+                "fuels": [
+                    {
+                        "fuel_id": int,
+                        "name": str,
+                        "is_self": bool,
+                        "price": float,
+                    }
+                ],
+            }
+
+        Returns an empty list on any network or parse failure.
+        """
+        body: dict[str, Any] = {
+            "priceOrder": "asc",
+            "points": [{"lat": lat, "lng": lon}],
+            "radius": radius_km * 1000,  # metres; server may cap internally
+        }
+        try:
+            async with self._session.post(
+                URL_OSPZ_SEARCH_ZONE,
+                json=body,
+                timeout=_TIMEOUT,
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Zone prices fetch failed: %s", exc)
+            return []
+
+        results: list[dict[str, Any]] = []
+        for item in data.get("results", []):
+            raw_date = item.get("insertDate")
+            insert_dt: _Datetime | None = None
+            if raw_date:
+                try:
+                    insert_dt = _Datetime.fromisoformat(raw_date)
+                    if insert_dt.tzinfo is None:
+                        insert_dt = insert_dt.replace(tzinfo=_TZ.utc)
+                    else:
+                        insert_dt = insert_dt.astimezone(_TZ.utc)
+                except ValueError:
+                    pass
+
+            try:
+                distance_km = float(item.get("distance", 0))
+            except (ValueError, TypeError):
+                distance_km = 0.0
+
+            fuels: list[dict[str, Any]] = []
+            for f in item.get("fuels", []):
+                fuels.append(
+                    {
+                        "fuel_id": int(f.get("fuelId", 0)),
+                        "name": f.get("name", ""),
+                        "is_self": bool(f.get("isSelf", False)),
+                        "price": float(f.get("price", 0)),
+                    }
+                )
+
+            results.append(
+                {
+                    "station_id": int(item["id"]),
+                    "location": item.get("location") or {},
+                    "brand": item.get("brand") or "",
+                    "distance_km": distance_km,
+                    "insert_date": insert_dt,
+                    "fuels": fuels,
+                }
+            )
+
+        return results
+
     async def async_validate_connectivity(self) -> bool:
         """Lightweight connectivity check — just tries to reach the registry URL.
 
@@ -67,33 +166,252 @@ class MimitApiClient:
             _LOGGER.debug("MIMIT connectivity check failed: %s", exc)
             return False
 
-    async def async_fetch_stations_near(
+    async def async_fetch_pb_haproxy_cookie(self) -> str | None:
+        """GET the PB homepage and return the ``_haproxy`` cookie value.
+
+        The search_handler.php endpoint requires this load-balancer session
+        cookie to return data (returns empty body without it).
+
+        Returns None on any failure; the discovery call degrades gracefully.
+        """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "text/html",
+            "Cookie": "cookiebar=accepted",
+        }
+        timeout = aiohttp.ClientTimeout(total=PB_SCRAPE_TIMEOUT_S)
+        try:
+            async with self._session.get(
+                URL_PB_HOMEPAGE, headers=headers, timeout=timeout, allow_redirects=True
+            ) as resp:
+                resp.raise_for_status()
+                cookie = resp.cookies.get("_haproxy")
+                if cookie:
+                    return cookie.value
+                # Also check the session-level jar (aiohttp stores them there)
+                jar_cookies = self._session.cookie_jar.filter_cookies(URL_PB_HOMEPAGE)
+                haproxy = jar_cookies.get("_haproxy")
+                return haproxy.value if haproxy else None
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("PB homepage cookie fetch failed: %s", exc)
+            return None
+
+    async def async_discover_pb_stations(
         self,
         lat: float,
         lon: float,
         radius_km: float,
     ) -> list[dict[str, Any]]:
-        """Search stations near a position via the unofficial REST API.
+        """Discover PB station IDs within a bounding box using search_handler.php.
 
-        Returns the list of station dicts from the ``distributori`` key,
-        or an empty list if the API is unavailable (it is reverse-engineered
-        and may be unstable).
+        Returns a list of dicts with keys: id (int), lat (float), lng (float), brand (str).
+        Returns an empty list on any failure.
+
+        PB uses its own station IDs (different from MIMIT).  Callers should
+        match returned stations to MIMIT stations by GPS proximity.
         """
-        payload = {"lat": lat, "lon": lon, "raggio": radius_km}
+        haproxy = await self.async_fetch_pb_haproxy_cookie()
+
+        lat_delta = radius_km / 111.0
+        lon_delta = radius_km / (111.0 * math.cos(math.radians(lat)))
+
+        params = {
+            "sel": "getStations",
+            "min_lat": f"{lat - lat_delta:.6f}",
+            "min_long": f"{lon - lon_delta:.6f}",
+            "max_lat": f"{lat + lat_delta:.6f}",
+            "max_long": f"{lon + lon_delta:.6f}",
+            "compact": "1",
+        }
+        cookie_parts = ["cookiebar=accepted"]
+        if haproxy:
+            cookie_parts.append(f"_haproxy={haproxy}")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "application/json, text/javascript, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": URL_PB_HOMEPAGE,
+            "Cookie": "; ".join(cookie_parts),
+        }
+        timeout = aiohttp.ClientTimeout(total=PB_SCRAPE_TIMEOUT_S)
         try:
-            async with self._session.post(
-                URL_API_POSITION,
-                json=payload,
-                timeout=_TIMEOUT,
+            async with self._session.get(
+                URL_PB_SEARCH_HANDLER, params=params, headers=headers, timeout=timeout
             ) as resp:
                 resp.raise_for_status()
-                data = await resp.json(content_type=None)
-                return data.get("distributori", []) if isinstance(data, dict) else []
+                raw = await resp.text()
         except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("PB discovery request failed: %s", exc)
+            return []
+
+        if not raw or not raw.strip():
             _LOGGER.debug(
-                "MIMIT REST API unavailable (%s) — falling back to CSV-only mode", exc
+                "PB discovery: empty response (haproxy cookie: %s)",
+                "present" if haproxy else "missing",
             )
             return []
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            _LOGGER.debug("PB discovery: JSON parse failed (%s) — raw: %s", exc, raw[:200])
+            return []
+
+        if not isinstance(data, list):
+            _LOGGER.debug("PB discovery: unexpected response type %s", type(data))
+            return []
+
+        results: list[dict[str, Any]] = []
+        for item in data:
+            try:
+                results.append({
+                    "id": int(item["id"]),
+                    "lat": float(item["lat"]),
+                    "lng": float(item["lng"]),
+                    "brand": str(item.get("brand", "")),
+                })
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        _LOGGER.debug(
+            "PB discovery: %d stazioni trovate nel raggio %.0f km",
+            len(results),
+            radius_km,
+        )
+        return results
+
+    async def async_scrape_station_community_prices(
+        self,
+        station_id: int,
+    ) -> list[dict[str, Any]]:
+        """Scrape community-reported prices for one station from prezzibenzina.it.
+
+        Returns a list of dicts with keys:
+            date (str), fuel (str), service (str), price (float),
+            is_self (bool), is_user_reported (bool), mimit_fuel (str | None)
+
+        Returns an empty list on any failure (network, parse, etc.).
+        """
+        url = URL_PB_STATION.format(station_id=station_id)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "it-IT,it;q=0.9",
+            "Cookie": "cookiebar=accepted",
+        }
+        timeout = aiohttp.ClientTimeout(total=PB_SCRAPE_TIMEOUT_S)
+        try:
+            async with self._session.get(url, headers=headers, timeout=timeout) as resp:
+                resp.raise_for_status()
+                html = await resp.text(errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("PB scrape station %d failed: %s", station_id, exc)
+            return []
+
+        _LOGGER.debug(
+            "PB scrape station %d: HTTP OK, html len=%d, "
+            "has st_reports_row=%s, first 300 chars: %s",
+            station_id,
+            len(html),
+            "st_reports_row" in html,
+            html[:300].replace("\n", " "),
+        )
+
+        # Detect "station not found" page — PB serves a generic page with an
+        # empty title ("<title> | Prezzi Benzina</title>") for unknown IDs.
+        if "<title> | Prezzi Benzina</title>" in html:
+            _LOGGER.debug(
+                "PB scrape station %d: stazione non presente nel database prezzibenzina.it "
+                "(ID MIMIT non mappato)",
+                station_id,
+            )
+            return []
+
+        results = self._parse_community_html(html)
+
+        if not results and "st_reports_row" in html:
+            _LOGGER.debug(
+                "PB scrape station %d: stazione trovata ma nessun prezzo community segnalato",
+                station_id,
+            )
+
+        return results
+
+    @staticmethod
+    def _parse_community_html(html: str) -> list[dict[str, Any]]:
+        """Extract community price rows from a prezzibenzina.it station page."""
+        rows = re.findall(
+            r'class="st_reports_row"[^>]*>\s*'
+            r'<div class="st_reports_data">([^<]+)</div>\s*'
+            r'<div class="st_reports_fuel[^"]*">([^<]+)</div>\s*'
+            r'<div class="st_reports_service">([^<]+)</div>\s*'
+            r'<div class="st_reports_price">([\d.,]+)\s*&euro;</div>',
+            html,
+        )
+        results: list[dict[str, Any]] = []
+        for date_str, fuel_raw, service_raw, price_raw in rows:
+            fuel = fuel_raw.strip()
+            service = service_raw.strip()
+            try:
+                price = float(price_raw.replace(",", "."))
+            except ValueError:
+                continue
+            if price <= 0:
+                continue
+            mimit_fuel = FUEL_MAP_PB_TO_MIMIT.get(fuel)
+            results.append({
+                "date": date_str.strip(),
+                "report_date": MimitApiClient._parse_pb_date(date_str),
+                "fuel": fuel,
+                "service": service,
+                "price": price,
+                "is_self": service in COMMUNITY_SERVICE_SELF,
+                "is_user_reported": service in COMMUNITY_SERVICE_USER_RPT,
+                "mimit_fuel": mimit_fuel,
+            })
+        return results
+
+    @staticmethod
+    def _parse_pb_date(date_str: str) -> _Date | None:
+        """Parse a prezzibenzina.it report date string to a Python date.
+
+        Handles:
+        - DD/MM/YYYY and DD/MM/YY (most common)
+        - "oggi" / "today"
+        - "ieri" / "yesterday"
+        - "N gg fa" / "N giorni fa" (N days ago)
+        Returns None on any parse failure.
+        """
+        s = date_str.strip().lower()
+        today = _Date.today()
+        if s in ("oggi", "today"):
+            return today
+        if s in ("ieri", "yesterday"):
+            return today - _Timedelta(days=1)
+        # "2 gg fa" or "3 giorni fa"
+        m = re.match(r"(\d+)\s*(?:gg|giorni?)\s*fa", s)
+        if m:
+            return today - _Timedelta(days=int(m.group(1)))
+        for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+            try:
+                from datetime import datetime as _dt
+                return _dt.strptime(s, fmt).date()
+            except ValueError:
+                pass
+        return None
 
     # ------------------------------------------------------------------
     # Private helpers

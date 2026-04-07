@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import MimitApiClient
-from .const import DOMAIN, PLATFORMS
+from .const import CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES, DOMAIN, PLATFORMS
 from .coordinator import CarburantiMimitCoordinator
 from .services import async_register_services, async_unregister_services
 from .storage import HistoryStorage
@@ -72,8 +72,9 @@ async def async_setup_entry(
 
     # Start the 08:15 Europe/Rome daily trigger
     coordinator.schedule_daily_refresh()
-    # Start the 14:30 Europe/Rome intraday spot-check via ospzApi
-    coordinator.schedule_intraday_refresh()
+    # Start community price scraping (prezzibenzina.it HTML) if enabled
+    if entry.options.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES):
+        coordinator.schedule_community_refresh()
 
     _LOGGER.info(
         "Carburanti MIMIT entry '%s' (%s) set up successfully",
@@ -92,7 +93,7 @@ async def async_unload_entry(
     runtime = getattr(entry, "runtime_data", None)
     if runtime is not None:
         runtime.coordinator.cancel_daily_refresh()
-        runtime.coordinator.cancel_intraday_refresh()
+        runtime.coordinator.cancel_community_refresh()
 
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 

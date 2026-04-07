@@ -89,7 +89,7 @@ async def async_push_price_statistics(
             f"Carburanti {fuel_type} – Minimo",
             fuel_type,
         )
-        stat = StatisticData(start=start, mean=cheapest_price)
+        stat = StatisticData(start=start, mean=round(cheapest_price, 3))
         try:
             async_add_external_statistics(hass, metadata, [stat])
             _LOGGER.debug(
@@ -108,7 +108,7 @@ async def async_push_price_statistics(
             f"Carburanti {fuel_type} – Media",
             fuel_type,
         )
-        stat = StatisticData(start=start, mean=average_price)
+        stat = StatisticData(start=start, mean=round(average_price, 3))
         try:
             async_add_external_statistics(hass, metadata, [stat])
             _LOGGER.debug(
