@@ -1,14 +1,19 @@
 """Pure-Python price trend analysis and 7-day forecast with AI geopolitical enrichment.
 
-Algorithm
----------
+Algorithm (ensemble)
+--------------------
 1. Extract price series from the last 30 days of HistoryStorage.
 2. Interpolate small gaps (≤ 3 consecutive missing days) linearly.
-3. Compute OLS linear regression over the last 14 points.
-4. If R² > 0.6 → use linear extrapolation for the 7-day forecast.
-   Otherwise → use a linearly-weighted moving average (WMA).
-5. Clamp predictions to [0.5 × mean_7d, 2.0 × mean_7d] to avoid nonsense.
-6. Confidence: high (≥30 pts, R²≥0.7) | medium (≥14 pts) | low (< 14 pts).
+3. Fit Exponentially Weighted OLS (EWOLS) over the last 14 points — recent
+   prices get exponentially higher weight (alpha=0.15).
+4. Run Holt's Double Exponential Smoothing (level + trend, α=0.3, β=0.1).
+5. Ensemble:
+   - If EWOLS R² ≥ 0.6 AND ≥14 data points: 60% EWOLS + 40% Holt forecast.
+   - If ≥5 data points (but EWOLS R² < 0.6): Holt only.
+   - Otherwise: linearly-weighted moving average (WMA) fallback.
+6. Volatility-adaptive clamping:
+   [max(0.5×μ₇, μ₇-3σ), min(2.0×μ₇, μ₇+3σ)]
+7. Confidence: high (≥30 pts, R²≥0.7) | medium (≥14 pts) | low (< 14 pts).
 
 Additional statistical indicators
 ----------------------------------
@@ -19,31 +24,31 @@ Additional statistical indicators
 
 No external dependencies — only the standard library is used.
 
-Optional AI enrichment with geopolitical context
--------------------------------------------------
+Optional AI enrichment with real-time market data
+--------------------------------------------------
 When ``CONF_AI_PROVIDER`` is configured, ``async_ai_prediction()`` calls the
-selected LLM API with a rich prompt that includes:
+selected LLM API with a prompt that includes:
 
-  • 30-day price history
+  • Real-time market data (Brent, TTF gas, ETS carbon, EUR/USD) from market.py
+  • Recent oil market news headlines from Google News RSS
+  • 30-day local price history
   • Statistical indicators (trend, volatility, momentum, acceleration)
-  • Seasonal demand context (summer/winter driving, heating season)
-  • Explicit request to analyse geopolitical factors known to the model:
-    - Brent/WTI crude price dynamics
-    - OPEC+ production decisions
-    - Geopolitical tensions affecting supply routes
-    - EUR/USD exchange rate impact on import costs
-    - Italian excise-tax (accise) and VAT components
-    - Refinery capacity and maintenance cycles
+  • Seasonal demand context
+  • Italian excise-tax (accise) and VAT structure
 
-The LLM response is expected to contain a risk-level tag ``[RISCHIO:basso]``,
-``[RISCHIO:medio]``, or ``[RISCHIO:alto]`` which is parsed and stored in
-``ai_risk_level``; the full text goes into ``ai_analysis``.
+The AI receives a dedicated *system* message with today's date and analyst role.
+A separate *user* message carries all the data.  Max tokens: 1200 (Claude) /
+1500 (OpenAI), up from 800 in previous versions.
+
+The LLM response uses structured tags: ``[RISCHIO:basso|medio|alto]``,
+``[PREZZO_3G:X.XXX]``, ``[SINTESI:testo breve]``.
 
 Errors fall back silently to ``None``.
 """
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -53,6 +58,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import aiohttp
 
+    from .market import MarketContext
     from .storage import DailySnapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,7 +72,15 @@ _CLAMP_HIGH_FACTOR = 2.0
 _MIN_POINTS_LOW = 1
 _MIN_POINTS_MEDIUM = 14
 _MIN_POINTS_HIGH = 30
+_MIN_POINTS_HOLT = 5             # Holt needs ≥2 but 5 gives stable init
 _MAX_GAP_INTERPOLATE = 3
+
+# Ensemble algorithm parameters
+_EWOLS_ALPHA = 0.15   # exponential decay for OLS weights (older = less weight)
+_HOLT_ALPHA  = 0.3    # Holt level smoothing
+_HOLT_BETA   = 0.1    # Holt trend smoothing
+_ENSEMBLE_WLS_WEIGHT  = 0.6   # when EWOLS R² ≥ threshold
+_ENSEMBLE_HOLT_WEIGHT = 0.4
 
 # AI API endpoints
 _CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
@@ -170,24 +184,46 @@ def compute_prediction(
             price_acceleration=None,
         )
 
-    # Fit linear regression on last 14 points (or all if fewer)
+    # --- Ensemble: EWOLS + Holt's Double Exponential Smoothing ---------------
     fit_window = prices[-14:]
     n = len(fit_window)
     xs = list(range(n))
-    slope, intercept = _linear_regression(xs, fit_window)
-    r2 = _r_squared(xs, fit_window, slope, intercept)
 
-    # Choose method
-    if r2 >= _R2_THRESHOLD and len(prices) >= _MIN_POINTS_MEDIUM:
-        method = "linear_regression"
-        predicted = [intercept + slope * (n + i) for i in range(7)]
+    # Method 1: Exponentially Weighted OLS (recent prices get higher weight)
+    slope_ew, intercept_ew, r2 = _ewols_regression(xs, fit_window, _EWOLS_ALPHA)
+
+    # Method 2: Holt's Double EMA (level + trend)
+    holt_pred: list[float] | None = None
+    if len(prices) >= _MIN_POINTS_HOLT:
+        holt_pred = _holt_exponential_smoothing(prices, _HOLT_ALPHA, _HOLT_BETA, 7)
+
+    # Ensemble selection
+    if r2 >= _R2_THRESHOLD and len(prices) >= _MIN_POINTS_MEDIUM and holt_pred is not None:
+        method = "ensemble_ols_holt"
+        ewols_f = [intercept_ew + slope_ew * (n + i) for i in range(7)]
+        predicted = [
+            _ENSEMBLE_WLS_WEIGHT * ew + _ENSEMBLE_HOLT_WEIGHT * h
+            for ew, h in zip(ewols_f, holt_pred)
+        ]
+        slope = slope_ew
+    elif holt_pred is not None:
+        method = "holt_exponential_smoothing"
+        predicted = holt_pred
+        slope = (predicted[-1] - predicted[0]) / 6.0 if len(predicted) == 7 else 0.0
     else:
         method = "moving_average"
+        slope = slope_ew
         predicted = _weighted_moving_average_forecast(prices, slope)
 
-    # Clamp predictions
-    lo = _CLAMP_LOW_FACTOR * mean_7d
-    hi = _CLAMP_HIGH_FACTOR * mean_7d
+    # Volatility-adaptive clamping: [max(0.5×μ, μ-3σ), min(2.0×μ, μ+3σ)]
+    prices_for_clamp = prices[-14:] if len(prices) >= 14 else prices
+    if len(prices_for_clamp) >= 3:
+        sigma = stdev(prices_for_clamp)
+        lo = max(_CLAMP_LOW_FACTOR * mean_7d, mean_7d - 3 * sigma)
+        hi = min(_CLAMP_HIGH_FACTOR * mean_7d, mean_7d + 3 * sigma)
+    else:
+        lo = _CLAMP_LOW_FACTOR * mean_7d
+        hi = _CLAMP_HIGH_FACTOR * mean_7d
     predicted = [max(lo, min(hi, p)) for p in predicted]
 
     # Round to 4 decimal places (EUR/L precision)
@@ -288,6 +324,75 @@ def _r_squared(
         return 1.0
     ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
     return max(0.0, 1.0 - ss_res / ss_tot)
+
+
+def _ew_weights(n: int, alpha: float = _EWOLS_ALPHA) -> list[float]:
+    """Exponential weights for *n* points.
+
+    The most-recent point (index n-1) gets weight ``exp(0) = 1``, older points
+    decay as ``exp(-alpha * (n-1-i))``.  Weights are returned un-normalised;
+    callers that need them to sum to 1 must divide by ``sum(weights)``.
+    """
+    return [math.exp(-alpha * (n - 1 - i)) for i in range(n)]
+
+
+def _ewols_regression(
+    xs: list[float],
+    ys: list[float],
+    alpha: float = _EWOLS_ALPHA,
+) -> tuple[float, float, float]:
+    """Exponentially-weighted OLS.  Returns (slope, intercept, weighted_r2)."""
+    n = len(xs)
+    if n < 2:
+        return 0.0, ys[0] if ys else 0.0, 0.0
+
+    ws = _ew_weights(n, alpha)
+    W      = sum(ws)
+    Wx     = sum(w * x for w, x in zip(ws, xs))
+    Wy     = sum(w * y for w, y in zip(ws, ys))
+    Wxx    = sum(w * x * x for w, x in zip(ws, xs))
+    Wxy    = sum(w * x * y for w, x, y in zip(ws, xs, ys))
+
+    denom = W * Wxx - Wx * Wx
+    if denom == 0:
+        return 0.0, Wy / W, 0.0
+
+    slope     = (W * Wxy - Wx * Wy) / denom
+    intercept = (Wy - slope * Wx) / W
+
+    # Weighted R²
+    y_wmean = Wy / W
+    ss_tot = sum(w * (y - y_wmean) ** 2 for w, y in zip(ws, ys))
+    if ss_tot == 0:
+        return slope, intercept, 1.0
+    ss_res = sum(w * (y - (slope * x + intercept)) ** 2 for w, x, y in zip(ws, xs, ys))
+    r2 = max(0.0, 1.0 - ss_res / ss_tot)
+    return slope, intercept, r2
+
+
+def _holt_exponential_smoothing(
+    prices: list[float],
+    alpha: float = _HOLT_ALPHA,
+    beta: float  = _HOLT_BETA,
+    n_forecast: int = 7,
+) -> list[float]:
+    """Holt's Double Exponential Smoothing (level + trend).
+
+    Returns a list of *n_forecast* predicted values starting from tomorrow.
+    Handles degenerate inputs (< 2 prices) gracefully.
+    """
+    if len(prices) < 2:
+        return [round(prices[0], 4)] * n_forecast if prices else [0.0] * n_forecast
+
+    level = prices[0]
+    trend = prices[1] - prices[0]
+
+    for p in prices[1:]:
+        level_prev, trend_prev = level, trend
+        level = alpha * p + (1 - alpha) * (level_prev + trend_prev)
+        trend = beta * (level - level_prev) + (1 - beta) * trend_prev
+
+    return [round(level + (i + 1) * trend, 4) for i in range(n_forecast)]
 
 
 def _weighted_moving_average_forecast(
@@ -409,12 +514,19 @@ async def async_ai_prediction(
     prediction: PredictionResult | None,
     current_price: float | None = None,
     national_average: float | None = None,
-) -> tuple[str | None, str | None, float | None]:
+    market_context: MarketContext | None = None,
+    openai_model: str | None = None,
+    claude_model: str | None = None,
+) -> tuple[str | None, str | None, float | None, str | None]:
     """Call an LLM for a geopolitical and market analysis of the price trend.
 
     Works from day 1: when *prediction* is ``None`` the prompt focuses on pure
     geopolitical/market context for the current price; as history accumulates
     the prompt is progressively enriched with statistical indicators.
+
+    *market_context* (from ``market.py``) injects real-time Brent/TTF/ETS/EUR/USD
+    prices and news headlines directly into the prompt so the AI reasons from
+    today's actual market data, not its training-data cutoff.
 
     Returns ``(ai_analysis, ai_risk_level, ai_price_3d, ai_brief)`` or
     ``(None, None, None, None)`` on error.
@@ -425,13 +537,15 @@ async def async_ai_prediction(
     """
     from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI  # avoid circular at top
 
-    prompt = _build_geopolitical_prompt(history, fuel_type, prediction, current_price, national_average)
+    prompt = _build_geopolitical_prompt(
+        history, fuel_type, prediction, current_price, national_average, market_context
+    )
 
     try:
         if provider == AI_PROVIDER_CLAUDE:
-            text = await _call_claude(session, api_key, prompt)
+            text = await _call_claude(session, api_key, prompt, claude_model)
         elif provider == AI_PROVIDER_OPENAI:
-            text = await _call_openai(session, api_key, prompt)
+            text = await _call_openai(session, api_key, prompt, openai_model)
         else:
             return None, None, None, None
 
@@ -462,6 +576,7 @@ def _build_geopolitical_prompt(
     prediction: PredictionResult | None,
     current_price: float | None = None,
     national_average: float | None = None,
+    market_context: MarketContext | None = None,
 ) -> str:
     """Build an adaptive prompt for geopolitical + market analysis.
 
@@ -469,10 +584,17 @@ def _build_geopolitical_prompt(
     - No history  → pure geopolitical/market context for the current price
     - Some history → adds observed price trend
     - Full stats   → adds 7-day forecast, volatility, momentum, acceleration
+
+    When *market_context* is provided the prompt leads with real-time Brent,
+    TTF, ETS, EUR/USD prices and news headlines so the AI reasons from today's
+    market data, not its training-data cutoff.
     """
     today = date.today().isoformat()
     seasonal = _seasonal_context()
     accisa = _ACCISE.get(fuel_type, 0.0)
+
+    # ---- Real-time market data section (Brent, TTF, ETS, EUR/USD, news) -----
+    market_section = _build_market_section(market_context)
 
     # ---- Price / history section ----------------------------------------
     recent = history[-30:] if history else []
@@ -548,9 +670,8 @@ def _build_geopolitical_prompt(
         )
         context_verb = "che determinano il livello di prezzo attuale"
 
-    return f"""Sei un analista di mercato energetico senior specializzato nel mercato italiano dei carburanti.
-La tua analisi deve integrare i dati di prezzo forniti con la tua conoscenza aggiornata dei mercati globali.
-
+    return f"""=== DATA ANALISI: {today} ===
+{market_section}
 {price_section}
 {stats_section}
 {nat_section}
@@ -628,6 +749,61 @@ Poi su una riga separata SOLO il tag: [SINTESI:testo max 12 parole]]
 Nessuna formula di cortesia. Solo analisi diretta e concisa."""
 
 
+def _build_market_section(market_context: MarketContext | None) -> str:
+    """Build the real-time market data block for the AI prompt.
+
+    Returns an empty string when *market_context* is None so the caller's
+    f-string simply produces a blank line — no hard failure.
+    """
+    if market_context is None:
+        return (
+            "=== DATI MERCATO IN TEMPO REALE ===\n"
+            "  N/D — dati di mercato non disponibili; usa la tua conoscenza aggiornata."
+        )
+
+    from datetime import timezone as _tz
+    import zoneinfo as _zi
+
+    try:
+        rome = _zi.ZoneInfo("Europe/Rome")
+        fetch_local = market_context.fetched_at.astimezone(rome).strftime("%H:%M")
+    except Exception:
+        fetch_local = market_context.fetched_at.strftime("%H:%M UTC")
+
+    lines: list[str] = [f"=== DATI MERCATO IN TEMPO REALE (aggiornati alle {fetch_local}) ==="]
+
+    if market_context.brent_usd is not None:
+        chg = f"  ({market_context.brent_change_pct:+.1f}% 24h)" if market_context.brent_change_pct is not None else ""
+        lines.append(f"• Brent crude:  {market_context.brent_usd:.2f} USD/bbl{chg}")
+        if market_context.brent_eur is not None:
+            cost_floor = market_context.brent_eur / 159  # 1 bbl ≈ 159 L
+            lines.append(
+                f"  = {market_context.brent_eur:.2f} EUR/bbl"
+                f"  (~{cost_floor:.4f} EUR/L costo grezzo teorico pre-raffinazione)"
+            )
+
+    if market_context.ttf_eur is not None:
+        chg_ttf = f"  ({market_context.ttf_change_pct:+.1f}% 24h)" if market_context.ttf_change_pct is not None else ""
+        lines.append(f"• Gas TTF:       {market_context.ttf_eur:.2f} EUR/MWh{chg_ttf}  ← costo energetico raffinerie")
+
+    if market_context.ets_eur is not None:
+        lines.append(f"• CO₂ ETS:       {market_context.ets_eur:.2f} EUR/ton  ← costo emissioni raffinazione")
+
+    if market_context.eurusd is not None:
+        lines.append(f"• EUR/USD:        {market_context.eurusd:.4f}  (ogni +1% EUR/USD ≈ -0.7/1 cent/L prezzi IT)")
+
+    if market_context.news_headlines:
+        lines.append("• Notizie recenti (Google News):")
+        for h in market_context.news_headlines:
+            lines.append(f"  - {h}")
+
+    lines.append(
+        "NOTA: Questi dati sono AGGIORNATI A OGGI. "
+        "Basati su questi numeri reali come fonte primaria, non su valori del tuo training."
+    )
+    return "\n".join(lines)
+
+
 def _parse_risk_level(text: str) -> str | None:
     """Extract risk level from the AI response tag [RISCHIO:xxx]."""
     match = _RISK_PATTERN.search(text)
@@ -673,12 +849,27 @@ def _parse_brief(text: str) -> str | None:
     return None
 
 
+def _ai_system_message() -> str:
+    """Return the system message for AI calls, including today's date."""
+    today = date.today().isoformat()
+    return (
+        f"Sei un analista senior del mercato energetico italiano. "
+        f"La data di oggi è {today}. "
+        "Usa i dati di mercato in tempo reale forniti nel prompt come fonte primaria "
+        "per il prezzo del Brent, TTF, ETS e EUR/USD. "
+        "La tua conoscenza storica è complementare, non sostitutiva, dei dati attuali. "
+        "Rispondi SEMPRE in italiano e SOLO nel formato strutturato richiesto."
+    )
+
+
 async def _call_claude(
     session: aiohttp.ClientSession,
     api_key: str,
     prompt: str,
+    model: str | None = None,
 ) -> str | None:
     """Call the Anthropic Claude API."""
+    from .const import DEFAULT_AI_MODEL_CLAUDE
     import aiohttp as _aiohttp
 
     headers = {
@@ -687,15 +878,16 @@ async def _call_claude(
         "content-type": "application/json",
     }
     payload = {
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 800,
+        "model": model or DEFAULT_AI_MODEL_CLAUDE,
+        "max_tokens": 1200,
+        "system": _ai_system_message(),
         "messages": [{"role": "user", "content": prompt}],
     }
     async with session.post(
         _CLAUDE_API_URL,
         headers=headers,
         json=payload,
-        timeout=_aiohttp.ClientTimeout(total=30),
+        timeout=_aiohttp.ClientTimeout(total=45),
     ) as resp:
         resp.raise_for_status()
         data = await resp.json()
@@ -709,8 +901,10 @@ async def _call_openai(
     session: aiohttp.ClientSession,
     api_key: str,
     prompt: str,
+    model: str | None = None,
 ) -> str | None:
     """Call the OpenAI Chat Completions API."""
+    from .const import DEFAULT_AI_MODEL_OPENAI
     import aiohttp as _aiohttp
 
     headers = {
@@ -718,15 +912,18 @@ async def _call_openai(
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "gpt-4o-mini",
-        "max_tokens": 800,
-        "messages": [{"role": "user", "content": prompt}],
+        "model": model or DEFAULT_AI_MODEL_OPENAI,
+        "max_tokens": 1500,
+        "messages": [
+            {"role": "system", "content": _ai_system_message()},
+            {"role": "user", "content": prompt},
+        ],
     }
     async with session.post(
         _OPENAI_API_URL,
         headers=headers,
         json=payload,
-        timeout=_aiohttp.ClientTimeout(total=30),
+        timeout=_aiohttp.ClientTimeout(total=45),
     ) as resp:
         resp.raise_for_status()
         data = await resp.json()

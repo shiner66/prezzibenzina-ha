@@ -153,6 +153,56 @@ AI_PROVIDER_OPENAI = "openai"
 AI_PROVIDERS = [AI_PROVIDER_NONE, AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI]
 
 # ---------------------------------------------------------------------------
+# AI model selection
+# ---------------------------------------------------------------------------
+CONF_AI_MODEL = "ai_model"
+
+# Default models (good quality / budget balance)
+DEFAULT_AI_MODEL_OPENAI = "gpt-4.1-mini"
+DEFAULT_AI_MODEL_CLAUDE = "claude-haiku-4-5-20251001"
+
+# Available OpenAI models (versioned IDs as of 2025-04 — use short alias names)
+# Listed in order: recommended first
+OPENAI_MODELS: list[str] = [
+    "gpt-4.1-mini",   # 2.5 M free token/day  ← recommended default
+    "gpt-4.1-nano",   # 2.5 M free token/day  — cheapest
+    "gpt-4o-mini",    # 2.5 M free token/day  — previous gen
+    "gpt-5-mini",     # 2.5 M free token/day  — latest gen mini
+    "gpt-4.1",        # 1 M free token/day (250 K tier 1-2) — high quality
+    "gpt-4o",         # 1 M free token/day (250 K tier 1-2) — proven
+    "gpt-5",          # 1 M free token/day (250 K tier 1-2) — best quality
+]
+
+CLAUDE_MODELS: list[str] = [
+    "claude-haiku-4-5-20251001",  # cheapest  ← default
+    "claude-sonnet-4-6",           # balanced
+]
+
+# Free daily token limit per OpenAI model group.
+# OpenAI billing rule: if a SINGLE request would exceed the daily limit,
+# the ENTIRE request is billed at standard rates (not just the overage).
+OPENAI_FREE_TIER_DAILY: dict[str, int] = {
+    "gpt-4.1-mini":   2_500_000,
+    "gpt-4.1-nano":   2_500_000,
+    "gpt-4o-mini":    2_500_000,
+    "gpt-5-mini":     2_500_000,
+    "gpt-5-nano":     2_500_000,
+    "gpt-4.1":          250_000,
+    "gpt-4o":           250_000,
+    "gpt-5":            250_000,
+    "o3":               250_000,
+    "o1":               250_000,
+}
+
+# Estimated tokens consumed per AI call (prompt ~2 000 + response ~1 500)
+AI_TOKENS_PER_CALL_EST = 3_500
+
+# ---------------------------------------------------------------------------
+# Market data (real-time, no API key required)
+# ---------------------------------------------------------------------------
+MARKET_DATA_CACHE_SECONDS = 3_600   # refresh at most once per hour
+
+# ---------------------------------------------------------------------------
 # Sensor suffix tokens
 # ---------------------------------------------------------------------------
 SENSOR_CHEAPEST = "cheapest"

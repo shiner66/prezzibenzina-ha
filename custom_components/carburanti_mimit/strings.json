@@ -22,15 +22,17 @@
       },
       "advanced": {
         "title": "Impostazioni avanzate",
-        "description": "Configura l'intervallo di aggiornamento e l'AI opzionale per l'analisi geopolitica. Media e prezzo minimo usano sempre tutte le stazioni nel raggio.",
+        "description": "Configura l'intervallo di aggiornamento e l'AI opzionale per l'analisi geopolitica. Media e prezzo minimo usano sempre tutte le stazioni nel raggio.\n\n{token_summary}",
         "data": {
           "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
           "ai_provider": "Provider AI (opzionale)",
-          "ai_api_key": "Chiave API AI"
+          "ai_api_key": "Chiave API AI",
+          "ai_model": "Modello AI"
         },
         "data_description": {
-          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
+          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato.",
+          "ai_model": "Raccomandato: gpt-4.1-mini (gruppo 2,5M tok/giorno). Premium con meno token free: gpt-4.1, gpt-4o, gpt-5. Claude: fatturato a consumo (nessun free tier)."
         }
       }
     },
@@ -52,6 +54,7 @@
       },
       "general": {
         "title": "Impostazioni generali",
+        "description": "{token_summary}",
         "data": {
           "radius_km": "Raggio di ricerca (km)",
           "fuel_types": "Tipi di carburante",
@@ -62,10 +65,12 @@
           "use_community_prices": "Usa prezzi community",
           "update_interval_community_min": "Intervallo aggiornamento community (min)",
           "ai_provider": "Provider AI (opzionale)",
-          "ai_api_key": "Chiave API AI"
+          "ai_api_key": "Chiave API AI",
+          "ai_model": "Modello AI"
         },
         "data_description": {
-          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
+          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato.",
+          "ai_model": "Raccomandato: gpt-4.1-mini (gruppo 2,5M tok/giorno). Premium con meno token free: gpt-4.1, gpt-4o, gpt-5. Claude: fatturato a consumo (nessun free tier)."
         }
       },
       "stations": {

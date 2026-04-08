@@ -22,15 +22,17 @@
       },
       "advanced": {
         "title": "Advanced settings",
-        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.",
+        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.\n\n{token_summary}",
         "data": {
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
           "ai_provider": "AI provider (optional)",
-          "ai_api_key": "AI API key"
+          "ai_api_key": "AI API key",
+          "ai_model": "AI model"
         },
         "data_description": {
-          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
+          "ai_model": "Recommended: gpt-4.1-mini (2.5M free token/day group). Lower free quota: gpt-4.1, gpt-4o, gpt-5. Claude: no free tier (pay-per-token)."
         }
       }
     },
@@ -52,6 +54,7 @@
       },
       "general": {
         "title": "General settings",
+        "description": "{token_summary}",
         "data": {
           "radius_km": "Search radius (km)",
           "fuel_types": "Fuel types",
@@ -62,10 +65,12 @@
           "use_community_prices": "Use community prices",
           "update_interval_community_min": "Community update interval (min)",
           "ai_provider": "AI provider (optional)",
-          "ai_api_key": "AI API key"
+          "ai_api_key": "AI API key",
+          "ai_model": "AI model"
         },
         "data_description": {
-          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
+          "ai_model": "Recommended: gpt-4.1-mini (2.5M free token/day group). Lower free quota: gpt-4.1, gpt-4o, gpt-5. Claude: no free tier (pay-per-token)."
         }
       },
       "stations": {

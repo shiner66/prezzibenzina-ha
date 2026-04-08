@@ -12,10 +12,15 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import MimitApiClient
 from .const import (
+    AI_PROVIDER_CLAUDE,
     AI_PROVIDER_NONE,
+    AI_PROVIDER_OPENAI,
     AI_PROVIDERS,
+    AI_TOKENS_PER_CALL_EST,
     ALL_FUEL_TYPES,
+    CLAUDE_MODELS,
     CONF_AI_API_KEY,
+    CONF_AI_MODEL,
     CONF_AI_PROVIDER,
     CONF_FAVORITE_STATIONS,
     CONF_FUEL_TYPES,
@@ -28,6 +33,8 @@ from .const import (
     CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
     CONF_UPDATE_INTERVAL_H,
     CONF_USE_COMMUNITY_PRICES,
+    DEFAULT_AI_MODEL_CLAUDE,
+    DEFAULT_AI_MODEL_OPENAI,
     DEFAULT_FAVORITE_STATIONS,
     DEFAULT_FUEL_TYPES,
     DEFAULT_INCLUDE_SELF,
@@ -38,6 +45,8 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_H,
     DEFAULT_USE_COMMUNITY_PRICES,
     DOMAIN,
+    OPENAI_FREE_TIER_DAILY,
+    OPENAI_MODELS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +57,42 @@ _AI_PROVIDER_LABELS = {
     "claude": "Claude (Anthropic)",
     "openai": "OpenAI (ChatGPT)",
 }
+
+
+def _estimate_daily_tokens(fuel_types: list[str], refresh_min: int) -> int:
+    """Estimate daily token usage based on current config."""
+    calls_per_day = max(1, (24 * 60) // max(1, refresh_min))
+    return calls_per_day * len(fuel_types) * AI_TOKENS_PER_CALL_EST
+
+
+def _build_token_summary(fuel_types: list[str], refresh_min: int) -> str:
+    """Build a full model-comparison table for display in description_placeholders.
+
+    Shows estimated daily token usage vs free-tier limits for every model group
+    at the *current* config (fuel_types × refresh interval). The estimate does
+    NOT update in real-time while the form is open; reopen settings after
+    changing refresh interval or fuel types to see updated numbers.
+    """
+    daily_est = _estimate_daily_tokens(fuel_types, refresh_min)
+    calls_per_fuel = max(1, (24 * 60) // max(1, refresh_min))
+    calls_total = calls_per_fuel * len(fuel_types)
+
+    limit_mini = OPENAI_FREE_TIER_DAILY.get("gpt-4.1-mini", 2_500_000)
+    limit_premium = OPENAI_FREE_TIER_DAILY.get("gpt-4.1", 250_000)
+
+    def _row(limit: int) -> str:
+        pct = daily_est / limit * 100
+        icon = "✓" if pct < 90 else "⚠ rischio billing"
+        return f"{daily_est:,} tok/gg ({pct:.1f}% di {limit:,}) {icon}"
+
+    return (
+        f"Stima: ~{daily_est:,} tok/giorno ({calls_total} chiamate AI/giorno con {len(fuel_types)} carburante/i)\n"
+        f"• gpt-4.1-mini / gpt-4.1-nano / gpt-4o-mini / gpt-5-mini → {_row(limit_mini)}\n"
+        f"• gpt-4.1 / gpt-4o / gpt-5 → {_row(limit_premium)}\n"
+        f"• Claude (Haiku/Sonnet) → nessun free tier (fatturato a consumo)\n"
+        f"⚠ Free tier OpenAI attivo solo con Data Sharing abilitato (impostazioni account OpenAI).\n"
+        f"⚠ La stima si aggiorna riaprendo le impostazioni dopo aver cambiato intervallo o carburanti."
+    )
 
 
 class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -157,6 +202,7 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._options[CONF_UPDATE_INTERVAL_H] = int(user_input[CONF_UPDATE_INTERVAL_H])
             self._options[CONF_AI_PROVIDER] = user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
             self._options[CONF_AI_API_KEY] = user_input.get(CONF_AI_API_KEY, "")
+            self._options[CONF_AI_MODEL] = user_input.get(CONF_AI_MODEL, DEFAULT_AI_MODEL_OPENAI)
             self._options[CONF_USE_COMMUNITY_PRICES] = user_input.get(
                 CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
             )
@@ -173,6 +219,10 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 options=self._options,
             )
 
+        fuel_types = self._options.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
+        refresh_min = self._options.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
+
+        all_models = OPENAI_MODELS + CLAUDE_MODELS
         schema = vol.Schema(
             {
                 vol.Required(CONF_TOP_N, default=DEFAULT_TOP_N): selector.NumberSelector(
@@ -202,12 +252,22 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_AI_API_KEY, default=""): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
+                vol.Optional(CONF_AI_MODEL, default=DEFAULT_AI_MODEL_OPENAI): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": m, "label": m} for m in all_models],
+                        multiple=False,
+                        custom_value=True,
+                    )
+                ),
             }
         )
 
         return self.async_show_form(
             step_id="advanced",
             data_schema=schema,
+            description_placeholders={
+                "token_summary": _build_token_summary(fuel_types, refresh_min),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -271,6 +331,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 ),
                 CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
                 CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
+                CONF_AI_MODEL: user_input.get(CONF_AI_MODEL, DEFAULT_AI_MODEL_OPENAI),
             }
             new_options.setdefault(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
             return self.async_create_entry(title="", data=new_options)
@@ -310,8 +371,19 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(CONF_AI_API_KEY): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
+                vol.Optional(CONF_AI_MODEL): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": m, "label": m} for m in (OPENAI_MODELS + CLAUDE_MODELS)],
+                        multiple=False,
+                        custom_value=True,
+                    )
+                ),
             }
         )
+
+        current_model = opts.get(CONF_AI_MODEL, DEFAULT_AI_MODEL_OPENAI)
+        current_fuel_types = opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
+        current_refresh = opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
 
         return self.async_show_form(
             step_id="general",
@@ -319,17 +391,21 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 schema,
                 {
                     CONF_RADIUS_KM: opts.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM),
-                    CONF_FUEL_TYPES: opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES),
+                    CONF_FUEL_TYPES: current_fuel_types,
                     CONF_INCLUDE_SELF: opts.get(CONF_INCLUDE_SELF, DEFAULT_INCLUDE_SELF),
                     CONF_INCLUDE_SERVITO: opts.get(CONF_INCLUDE_SERVITO, DEFAULT_INCLUDE_SERVITO),
                     CONF_TOP_N: opts.get(CONF_TOP_N, DEFAULT_TOP_N),
                     CONF_UPDATE_INTERVAL_H: opts.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H),
                     CONF_USE_COMMUNITY_PRICES: opts.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES),
-                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN: opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN),
+                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN: current_refresh,
                     CONF_AI_PROVIDER: opts.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
                     CONF_AI_API_KEY: opts.get(CONF_AI_API_KEY, ""),
+                    CONF_AI_MODEL: current_model,
                 },
             ),
+            description_placeholders={
+                "token_summary": _build_token_summary(current_fuel_types, current_refresh),
+            },
         )
 
     # ------------------------------------------------------------------

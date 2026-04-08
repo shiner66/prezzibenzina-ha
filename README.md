@@ -12,9 +12,10 @@ Integrazione Home Assistant per i prezzi dei carburanti italiani, basata sui dat
 - **Classifica dei più economici** con dettagli (nome, indirizzo, distanza, self/servito)
 - **Storico 90 giorni** con grafici nativi in Lovelace (Long-Term Statistics)
 - **Variazione prezzi**: settimanale, mensile, 7 giorni
-- **Previsione 7 giorni** tramite regressione lineare e media mobile ponderata (zero dipendenze esterne)
+- **Previsione 7 giorni** con algoritmo ensemble (EWOLS + Holt Double Exponential Smoothing) e clamping adattivo alla volatilità
 - **Indicatori statistici avanzati**: volatilità, momentum, accelerazione del prezzo
-- **Analisi AI con contesto geopolitico** (Claude / OpenAI): ad ogni aggiornamento il modello analizza i fattori di mercato globali e stima il rischio di rincari
+- **Analisi AI con dati di mercato in tempo reale** (Claude / OpenAI): prima di ogni chiamata AI vengono iniettati i prezzi live di Brent, TTF gas, ETS carbonio, EUR/USD e le ultime notizie da Google News — il modello risponde sempre con contesto aggiornato
+- **Scelta del modello AI** nella configurazione, con stima del consumo token/giorno per tutti i modelli e confronto con i limiti del free tier OpenAI
 - **Servizi HA** per aggiornamenti forzati e ricerche ad-hoc da automazioni
 
 ## Fonte dati
@@ -62,6 +63,11 @@ La configurazione avviene tramite UI in 3 step:
 | Intervallo aggiornamento | 24 h | Frequenza di polling |
 | Provider AI | Nessuno | Claude (Anthropic) o OpenAI |
 | Chiave API AI | — | Necessaria solo se si usa AI |
+| Modello AI | gpt-4.1-mini | Modello da usare per l'analisi (con stima token/giorno e confronto limiti free tier) |
+
+La schermata mostra automaticamente la stima di token/giorno per tutti i gruppi di modelli in base all'intervallo e ai carburanti scelti, con avviso se si rischia di superare il limite free tier OpenAI. La stima si aggiorna riaprendo le impostazioni.
+
+> **Nota free tier OpenAI**: il limite gratuito (2,5M o 250K token/giorno a seconda del modello) è attivo **solo con il Data Sharing abilitato** nelle impostazioni dell'account OpenAI. Il billing è **all-or-nothing**: se una singola richiesta supera il limite residuo, l'intera richiesta viene fatturata.
 
 ## Sensori creati
 
@@ -130,16 +136,18 @@ ai_risk_level: "medio"        # basso / medio / alto — estratto dalla risposta
 
 ## Previsione prezzi — Logica statistica
 
-La previsione a 7 giorni usa un algoritmo puramente statistico (nessuna dipendenza esterna):
+La previsione a 7 giorni usa un algoritmo ensemble puramente statistico (nessuna dipendenza esterna):
 
 1. **Raccolta dati**: ultimi 30 giorni di storico locale (aggiornato ad ogni fetch MIMIT)
 2. **Pulizia serie**: interpolazione lineare per gap ≤ 3 giorni consecutivi
-3. **Regressione OLS**: calcolo su finestra 14 giorni → pendenza + intercetta + R²
-4. **Scelta metodo**:
-   - R² ≥ 0.6 e ≥ 14 punti → **regressione lineare** (trend chiaro)
-   - Altrimenti → **media mobile ponderata** (WMA, peso lineare: più recente = maggiore)
-5. **Clamping**: le previsioni vengono limitate a [0.5×, 2.0×] la media degli ultimi 7 giorni
-6. **Confidenza**:
+3. **EWOLS** (Exponentially Weighted OLS, α=0.15): regressione con peso esponenziale sui dati recenti → pendenza + intercetta + R²
+4. **Holt Double Exponential Smoothing** (α=0.3, β=0.1): cattura sia livello che trend, robusta su serie non lineari
+5. **Selezione metodo**:
+   - R² ≥ 0.6 e ≥ 14 punti → **ensemble 60% EWOLS + 40% Holt** (trend chiaro e dati sufficienti)
+   - ≥ 5 punti → **solo Holt** (trend incerto ma abbastanza dati)
+   - Altrimenti → **media mobile ponderata** (WMA fallback)
+6. **Clamping adattivo alla volatilità**: `[max(0.5×μ, μ−3σ), min(2.0×μ, μ+3σ)]` — i bound si restringono automaticamente su serie stabili e si allargano su serie volatili
+7. **Confidenza**:
    - `high`: ≥ 30 giorni di storico e R² ≥ 0.7
    - `medium`: ≥ 14 giorni
    - `low`: < 14 giorni (sensore `unavailable` sotto 7 giorni)
@@ -154,7 +162,7 @@ La previsione a 7 giorni usa un algoritmo puramente statistico (nessuna dipenden
 
 ---
 
-## Analisi AI con contesto geopolitico
+## Analisi AI con contesto geopolitico e dati di mercato in tempo reale
 
 ### Panoramica
 
@@ -162,8 +170,21 @@ Quando si configura un provider AI (Claude o OpenAI), ad **ogni aggiornamento** 
 
 - La serie storica dei prezzi degli ultimi 30 giorni
 - Tutti gli indicatori statistici calcolati (trend, volatilità, momentum, accelerazione)
+- **Dati di mercato in tempo reale** recuperati in parallelo prima di ogni chiamata AI (senza API key)
 - Il **contesto stagionale automatico** (es. estate = picco domanda benzina, inverno = riscaldamento)
 - Una richiesta esplicita di analisi geopolitica e di mercato
+
+### Dati di mercato iniettati in tempo reale
+
+| Fonte | Dati | API key |
+|-------|------|---------|
+| Yahoo Finance | Brent crude (BZ=F): prezzo corrente e variazione % | No |
+| Yahoo Finance | TTF gas naturale (TTF=F): prezzo e variazione % | No |
+| Yahoo Finance | EU ETS carbonio (EUAU.DE): prezzo e variazione % | No |
+| Frankfurter (BCE) | EUR/USD spot + Brent convertito in EUR | No |
+| Google News RSS | Ultime 5 notizie su petrolio/OPEC/greggio (hl=it) | No |
+
+I dati vengono recuperati in parallelo con `asyncio.gather` e cachati per 60 minuti nel coordinator. Il fallimento di una singola fonte non blocca le altre. Grazie a questi dati il modello AI può rispondere a eventi recenti (es. cessate il fuoco, decisioni OPEC, shock di cambio) anche se avvenuti dopo la sua data di training.
 
 ### Cosa analizza l'AI
 
@@ -215,12 +236,17 @@ L'analisi AI viene ricalcolata **ad ogni aggiornamento del coordinator** (defaul
 
 Le chiamate AI sono **fire-and-forget**: HA non aspetta la risposta per aggiornare gli altri sensori. Se la chiamata fallisce (rete, rate limit, ecc.) viene loggato un messaggio di debug e il valore precedente viene mantenuto.
 
-### Provider AI supportati
+### Provider AI supportati e selezione modello
 
-| Provider | Modello | Note |
-|----------|---------|-------|
-| Claude (Anthropic) | `claude-haiku-4-5` | Ottimo per analisi veloci e costi contenuti |
-| OpenAI | `gpt-4o-mini` | Alternativa compatibile |
+| Provider | Modelli supportati | Free tier |
+|----------|--------------------|-----------|
+| OpenAI | gpt-4.1-mini *(default)*, gpt-4.1-nano, gpt-4o-mini, gpt-5-mini | 2.500.000 tok/giorno |
+| OpenAI | gpt-4.1, gpt-4o, gpt-5 | 250.000 tok/giorno |
+| Claude (Anthropic) | claude-haiku-4-5, claude-sonnet-4-6 | Nessun free tier |
+
+Il modello si seleziona nella configurazione/opzioni. La UI mostra la stima di token/giorno per tutti i gruppi in base alle impostazioni salvate (intervallo × numero carburanti × ~3.500 token/chiamata).
+
+> **Free tier OpenAI**: richiede il Data Sharing attivo nelle impostazioni account. Il billing è **all-or-nothing** per richiesta: se il saldo residuo non copre l'intera chiamata, viene fatturata per intero.
 
 Imposta la chiave API nelle opzioni dell'integrazione (non viene mai inviata al server MIMIT).
 
@@ -299,10 +325,11 @@ automation:
 
 ## Limitazioni e avvertenze
 
-- La previsione è puramente statistica sui prezzi storici locali. Non considera variabili macroeconomiche in tempo reale.
-- L'analisi AI si basa sulle conoscenze del modello fino alla sua data di training. Per eventi molto recenti la qualità dell'analisi geopolitica può essere limitata.
+- La previsione statistica si basa sui prezzi storici locali; il modello ensemble migliora con almeno 14 giorni di dati.
+- I dati di mercato in tempo reale (Brent, TTF, ETS, EUR/USD, notizie) vengono iniettati nell'AI ma la qualità dell'analisi dipende comunque dalla capacità del modello di ragionare su di essi.
 - I prezzi MIMIT sono aggiornati una volta al giorno (08:00). Variazioni infragiornaliere non sono rilevabili.
 - La componente fiscale italiana (accise fisse) riduce l'elasticità del prezzo al pompa rispetto al greggio.
+- Il free tier OpenAI richiede il Data Sharing attivo; senza di esso ogni chiamata è fatturata normalmente.
 
 ## Crediti e licenza
 
