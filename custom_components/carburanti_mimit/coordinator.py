@@ -131,6 +131,10 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Shared AI results cache: fuel_type → {analysis, risk_level, price_3d, brief, price_tomorrow, confidence}
         self.ai_cache: dict[str, dict] = {}
 
+        # Real-time market context (Brent, TTF, ETS, EUR/USD, news headlines)
+        # Refreshed at most every MARKET_DATA_CACHE_SECONDS (60 min).
+        self._market_context = None  # MarketContext | None
+
     # ------------------------------------------------------------------
     # Public lifecycle
     # ------------------------------------------------------------------
@@ -283,6 +287,9 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 now_utc,
             )
 
+        # Refresh real-time market context (Brent, TTF, ETS, EUR/USD, news)
+        await self._async_refresh_market_context()
+
         return data
 
     async def _async_refresh_intraday(self) -> None:
@@ -296,6 +303,14 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         top of the already-updated MIMIT intraday prices, so the ±10%
         plausibility check is applied against the freshest official data.
         """
+        # Refresh market context if stale (once per hour max)
+        from .const import MARKET_DATA_CACHE_SECONDS
+        ctx = self._market_context
+        if ctx is None or (
+            datetime.now(timezone.utc) - ctx.fetched_at
+        ).total_seconds() > MARKET_DATA_CACHE_SECONDS:
+            await self._async_refresh_market_context()
+
         await self._async_intraday_mimit_update()
 
         use_community = self._config_entry.options.get(
@@ -303,6 +318,26 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         if use_community:
             await self._async_community_price_update()
+
+    async def _async_refresh_market_context(self) -> None:
+        """Fetch real-time market data (Brent, TTF, ETS, EUR/USD, news). Fails silently."""
+        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+        from .market import async_fetch_market_context
+
+        try:
+            session = async_get_clientsession(self.hass)
+            ctx = await async_fetch_market_context(session)
+            if ctx is not None:
+                self._market_context = ctx
+                _LOGGER.debug(
+                    "Market context: Brent=%.2f USD/bbl EUR/USD=%.4f news=%d titoli",
+                    ctx.brent_usd or 0,
+                    ctx.eurusd or 0,
+                    len(ctx.news_headlines),
+                )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Market context fetch failed — %s: %s", type(exc).__name__, exc)
 
     async def _async_intraday_mimit_update(self) -> None:
         """Overlay intraday MIMIT prices from the OsservaPrezzi zone API.

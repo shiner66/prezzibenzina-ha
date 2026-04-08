@@ -449,7 +449,9 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             and self._peer_ai_insight._ai_analysis is None
         )
         if ai_provider != AI_PROVIDER_NONE and ai_key and (self._ai_analysis is None or insight_needs_data):
+            from .const import CONF_AI_MODEL
             area = _area(self.coordinator, self._fuel_type)
+            ai_model = self._config_entry.options.get(CONF_AI_MODEL, None)
             self.hass.async_create_task(
                 self._async_fetch_ai_analysis(
                     ai_provider,
@@ -457,6 +459,7 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
                     history,
                     area.cheapest_price if area else None,
                     area.national_average if area else None,
+                    ai_model=ai_model,
                 )
             )
 
@@ -468,12 +471,15 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         ai_provider = self._config_entry.options.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)
         ai_key = self._config_entry.options.get(CONF_AI_API_KEY, "")
         if ai_provider != AI_PROVIDER_NONE and ai_key:
+            from .const import CONF_AI_MODEL, DEFAULT_AI_MODEL_CLAUDE, DEFAULT_AI_MODEL_OPENAI
             area = _area(self.coordinator, self._fuel_type)
             current_price = area.cheapest_price if area else None
             national_average = area.national_average if area else None
+            ai_model = self._config_entry.options.get(CONF_AI_MODEL, None)
             self.hass.async_create_task(
                 self._async_fetch_ai_analysis(
-                    ai_provider, ai_key, history, current_price, national_average
+                    ai_provider, ai_key, history, current_price, national_average,
+                    ai_model=ai_model,
                 )
             )
 
@@ -486,11 +492,19 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         history: list,
         current_price: float | None = None,
         national_average: float | None = None,
+        ai_model: str | None = None,
     ) -> None:
         """Fetch AI geopolitical analysis and trigger a state write."""
+        from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI
         from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
         session = async_get_clientsession(self.hass)
+        market_context = getattr(self.coordinator, "_market_context", None)
+
+        # Route the configured model to the right provider parameter
+        openai_model = ai_model if provider == AI_PROVIDER_OPENAI else None
+        claude_model = ai_model if provider == AI_PROVIDER_CLAUDE else None
+
         analysis, risk_level, price_3d, brief = await async_ai_prediction(
             session,
             provider,
@@ -500,6 +514,9 @@ class PricePredictionSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
             self._prediction,
             current_price=current_price,
             national_average=national_average,
+            market_context=market_context,
+            openai_model=openai_model,
+            claude_model=claude_model,
         )
         if (analysis != self._ai_analysis
                 or risk_level != self._ai_risk_level

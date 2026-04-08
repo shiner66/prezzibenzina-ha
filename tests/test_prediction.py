@@ -7,6 +7,8 @@ import pytest
 
 from custom_components.carburanti_mimit.prediction import (
     PredictionResult,
+    _ewols_regression,
+    _holt_exponential_smoothing,
     compute_prediction,
 )
 from custom_components.carburanti_mimit.storage import DailySnapshot
@@ -186,6 +188,129 @@ class TestStatisticalIndicators:
         assert result is not None
         if result.monthly_change_pct is not None:
             assert result.monthly_change_pct < 0
+
+
+# ---------------------------------------------------------------------------
+# Ensemble algorithm — new methods
+# ---------------------------------------------------------------------------
+
+class TestEWOLSRegression:
+    def test_flat_series_slope_near_zero(self):
+        xs = list(range(14))
+        ys = [1.800] * 14
+        slope, intercept, r2 = _ewols_regression(xs, ys)
+        assert abs(slope) < 1e-9
+        assert abs(intercept - 1.800) < 1e-6
+
+    def test_rising_series_positive_slope(self):
+        xs = list(range(14))
+        ys = [1.700 + i * 0.005 for i in range(14)]
+        slope, intercept, r2 = _ewols_regression(xs, ys)
+        assert slope > 0
+
+    def test_r2_perfect_on_linear_data(self):
+        xs = list(range(14))
+        ys = [1.700 + i * 0.005 for i in range(14)]
+        _, _, r2 = _ewols_regression(xs, ys)
+        assert r2 > 0.99
+
+    def test_recent_data_dominates_older(self):
+        """A rising-then-sharp-drop series: EWOLS slope should be negative
+        (recent drop dominates) while plain OLS might be positive."""
+        # First 7 points rise, last 7 drop sharply
+        ys = [1.700 + i * 0.010 for i in range(7)] + [1.800 - i * 0.020 for i in range(7)]
+        xs = list(range(14))
+        slope, _, _ = _ewols_regression(xs, ys)
+        # Recent data (drop) should dominate → slope negative
+        assert slope < 0
+
+    def test_degenerate_single_point(self):
+        slope, intercept, r2 = _ewols_regression([0], [1.800])
+        assert slope == 0.0
+        assert intercept == pytest.approx(1.800)
+
+
+class TestHoltExponentialSmoothing:
+    def test_flat_series_stays_flat(self):
+        prices = [1.800] * 20
+        forecasts = _holt_exponential_smoothing(prices, alpha=0.3, beta=0.1, n_forecast=7)
+        assert len(forecasts) == 7
+        for f in forecasts:
+            assert abs(f - 1.800) < 0.02  # near 1.800
+
+    def test_rising_series_extrapolates_upward(self):
+        prices = [1.700 + i * 0.005 for i in range(20)]
+        forecasts = _holt_exponential_smoothing(prices)
+        assert forecasts[-1] > prices[-1]  # forecast day 7 > last observed
+
+    def test_falling_series_extrapolates_downward(self):
+        prices = [1.900 - i * 0.005 for i in range(20)]
+        forecasts = _holt_exponential_smoothing(prices)
+        assert forecasts[-1] < prices[-1]
+
+    def test_returns_seven_forecasts(self):
+        forecasts = _holt_exponential_smoothing([1.800] * 10)
+        assert len(forecasts) == 7
+
+    def test_degenerate_single_point_no_crash(self):
+        forecasts = _holt_exponential_smoothing([1.800])
+        assert len(forecasts) == 7
+        assert all(f == pytest.approx(1.800) for f in forecasts)
+
+
+class TestEnsembleMethod:
+    def test_ensemble_used_when_ewols_r2_sufficient(self):
+        """30-point linear rising history → EWOLS R² high → ensemble method."""
+        result = compute_prediction(_rising_history(30), "Benzina")
+        assert result is not None
+        assert result.method_used in ("ensemble_ols_holt", "holt_exponential_smoothing", "moving_average")
+
+    def test_holt_only_when_few_points(self):
+        """5–13 points → can't use EWOLS ensemble (< 14), use Holt."""
+        result = compute_prediction(_flat_history(8), "Benzina")
+        assert result is not None
+        assert result.method_used in ("holt_exponential_smoothing", "moving_average")
+
+    def test_wma_fallback_with_very_few_points(self):
+        """< 5 points → Holt not available → WMA fallback."""
+        result = compute_prediction(_flat_history(3), "Benzina")
+        assert result is not None
+        assert result.method_used == "moving_average"
+
+    def test_method_used_values_valid(self):
+        """method_used must be one of the three valid values."""
+        valid = {"ensemble_ols_holt", "holt_exponential_smoothing", "moving_average"}
+        for n in [3, 8, 14, 30]:
+            result = compute_prediction(_rising_history(n), "Benzina")
+            if result:
+                assert result.method_used in valid
+
+
+class TestVolatilityAdaptiveClamping:
+    def test_predictions_always_positive(self):
+        result = compute_prediction(_flat_history(30, price=1.800), "Benzina")
+        assert result is not None
+        for p in result.predicted_prices:
+            assert p > 0
+
+    def test_outer_bounds_never_exceeded(self):
+        """Even with adaptive clamping, values must stay within [0.5×μ, 2.0×μ]."""
+        history = _make_history([1.700 + i * 0.010 for i in range(30)])
+        result = compute_prediction(history, "Benzina")
+        assert result is not None
+        mean_7d = sum(h.cheapest for h in history[-7:] if h.cheapest) / 7
+        for p in result.predicted_prices:
+            assert p >= 0.5 * mean_7d - 0.01
+            assert p <= 2.0 * mean_7d + 0.01
+
+    def test_tight_bounds_on_stable_prices(self):
+        """Low-volatility (flat) series: bounds are tighter than the outer limits."""
+        history = _flat_history(30, price=1.800)
+        result = compute_prediction(history, "Benzina")
+        assert result is not None
+        # With near-zero σ, predictions should be very close to 1.800
+        for p in result.predicted_prices:
+            assert abs(p - 1.800) < 0.20  # tighter than ±0.9 outer bound
 
 
 # ---------------------------------------------------------------------------

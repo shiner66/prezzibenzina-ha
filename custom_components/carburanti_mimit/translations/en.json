@@ -22,15 +22,17 @@
       },
       "advanced": {
         "title": "Advanced settings",
-        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.",
+        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.\n\nEstimated token usage/day (current config): ~{estimated_daily_tokens}\n{token_status}\n⚠ OpenAI billing: if a single request exceeds the daily limit, the entire request is billed at standard rates.",
         "data": {
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
           "ai_provider": "AI provider (optional)",
-          "ai_api_key": "AI API key"
+          "ai_api_key": "AI API key",
+          "ai_model": "AI model"
         },
         "data_description": {
-          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
+          "ai_model": "2.5M free token/day group: gpt-4.1-mini, gpt-4o-mini, gpt-5-mini. 1M/day free group (250K for tiers 1-2): gpt-4.1, gpt-4o, gpt-5. Claude: claude-haiku (cheapest), claude-sonnet (balanced)."
         }
       }
     },
@@ -52,6 +54,7 @@
       },
       "general": {
         "title": "General settings",
+        "description": "Estimated token usage/day (current config): ~{estimated_daily_tokens}\n{token_status}",
         "data": {
           "radius_km": "Search radius (km)",
           "fuel_types": "Fuel types",
@@ -62,10 +65,12 @@
           "use_community_prices": "Use community prices",
           "update_interval_community_min": "Community update interval (min)",
           "ai_provider": "AI provider (optional)",
-          "ai_api_key": "AI API key"
+          "ai_api_key": "AI API key",
+          "ai_model": "AI model"
         },
         "data_description": {
-          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
+          "ai_model": "2.5M free token/day group: gpt-4.1-mini, gpt-4o-mini, gpt-5-mini. 1M/day free group (250K for tiers 1-2): gpt-4.1, gpt-4o, gpt-5. Claude: claude-haiku (cheapest), claude-sonnet (balanced)."
         }
       },
       "stations": {
