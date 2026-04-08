@@ -227,6 +227,8 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._config_entry = config_entry
+        # Set in async_step_stations (fuel-type sub-step), consumed by async_step_stations_picker
+        self._chosen_fuel_types: list[str] = []
 
     # ------------------------------------------------------------------
     # Root menu
@@ -344,28 +346,60 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(step_id="general", data_schema=schema)
 
     # ------------------------------------------------------------------
-    # Menu option B — favourite station picker
+    # Menu option B — step 1: choose fuel types globally
     # ------------------------------------------------------------------
 
     async def async_step_stations(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Let the user pick which station × fuel-type pairs to pin as sensors.
+        """Step 1 of 2: choose which fuel types to show in the station picker.
 
-        Options are encoded as "station_id:fuel_type" strings so each row in
-        the list represents one sensor (one station, one fuel type).
+        The selection is stored as the global CONF_FUEL_TYPES so ranking sensors
+        and the station picker share the same setting.
         """
         opts = self._config_entry.options
 
         if user_input is not None:
+            self._chosen_fuel_types = user_input[CONF_FUEL_TYPES]
+            return await self.async_step_stations_picker()
+
+        current_fuel_types: list[str] = opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_FUEL_TYPES,
+                    default=current_fuel_types,
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": ft, "label": ft} for ft in ALL_FUEL_TYPES],
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(step_id="stations", data_schema=schema)
+
+    # ------------------------------------------------------------------
+    # Menu option B — step 2: pick station × fuel-type combinations
+    # ------------------------------------------------------------------
+
+    async def async_step_stations_picker(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 2 of 2: pick which station × fuel-type pairs become sensors."""
+        opts = self._config_entry.options
+
+        if user_input is not None:
             selected: list[str] = user_input.get(CONF_FAVORITE_STATIONS, [])
-            # Re-read at save time to avoid clobbering general settings saved
-            # in the same HA options session.
-            new_options = {**self._config_entry.options, CONF_FAVORITE_STATIONS: selected}
+            new_options = {
+                **self._config_entry.options,
+                CONF_FUEL_TYPES: self._chosen_fuel_types,
+                CONF_FAVORITE_STATIONS: selected,
+            }
             return self.async_create_entry(title="", data=new_options)
 
-        # Build the flat list of "station_id:fuel_type" options
-        pair_options, station_count = self._build_station_options()
+        pair_options, station_count = self._build_station_options(self._chosen_fuel_types)
         current: list[str] = opts.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
 
         # Preserve selections that have temporarily left the radius
@@ -394,7 +428,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
 
         no_data = station_count == 0
         return self.async_show_form(
-            step_id="stations",
+            step_id="stations_picker",
             data_schema=schema,
             description_placeholders={
                 "station_count": str(station_count),
@@ -406,20 +440,16 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
-    def _build_station_options(self) -> tuple[list[dict[str, str]], int]:
-        """Return (options, station_count) from the coordinator's live snapshot.
-
-        Each option value is "station_id:fuel_type" so the user picks individual
-        combinations rather than whole stations.
-        """
+    def _build_station_options(
+        self, fuel_types: list[str]
+    ) -> tuple[list[dict[str, str]], int]:
+        """Return (options, station_count) for the given fuel types."""
         try:
             coordinator = self._config_entry.runtime_data.coordinator
             stations = coordinator.data.stations_in_radius if coordinator.data else []
         except AttributeError:
             return [], 0
 
-        # Show ALL fuel types in the picker so users can pin e.g. HVO stations
-        # without enabling that type globally for ranking sensors.
         options: list[dict[str, str]] = []
         for s in stations:
             name_tc = s["name"].title()
@@ -431,7 +461,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             else:
                 display = name_tc or brand
             location = f"{s['comune']} ({s['distance_km']:.1f} km)"
-            for ft in ALL_FUEL_TYPES:
+            for ft in fuel_types:
                 options.append({
                     "value": f"{s['id']}:{ft}",
                     "label": f"{display} | {location} — {ft}",

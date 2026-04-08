@@ -69,13 +69,20 @@
         }
       },
       "stations": {
+        "title": "Carburanti da monitorare",
+        "description": "Scegli i tipi di carburante che ti interessano. La selezione si applica sia ai sensori di classifica sia alle stazioni preferite.",
+        "data": {
+          "fuel_types": "Tipi di carburante"
+        }
+      },
+      "stations_picker": {
         "title": "Stazioni preferite",
         "description": "Seleziona le stazioni da monitorare come sensori individuali. Trovate {station_count} stazioni nel raggio configurato.{no_data_hint}",
         "data": {
-          "favorite_station_ids": "Stazioni preferite"
+          "favorite_stations": "Stazioni preferite"
         },
         "data_description": {
-          "favorite_station_ids": "Ogni stazione selezionata genererà un sensore dedicato per ciascun tipo di carburante configurato."
+          "favorite_stations": "Ogni riga selezionata crea un sensore dedicato."
         }
       }
     }

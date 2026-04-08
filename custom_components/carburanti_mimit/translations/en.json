@@ -69,13 +69,20 @@
         }
       },
       "stations": {
-        "title": "Favourite stations",
-        "description": "Select the stations to monitor as individual sensors. Found {station_count} stations within the configured radius.{no_data_hint}",
+        "title": "Fuel types to monitor",
+        "description": "Choose which fuel types you care about. This applies to both ranking sensors and the favourite station picker.",
         "data": {
-          "favorite_station_ids": "Favourite stations"
+          "fuel_types": "Fuel types"
+        }
+      },
+      "stations_picker": {
+        "title": "Favourite stations",
+        "description": "Select which stations to monitor as individual sensors. Found {station_count} stations within the configured radius.{no_data_hint}",
+        "data": {
+          "favorite_stations": "Favourite stations"
         },
         "data_description": {
-          "favorite_station_ids": "Each selected station will create a dedicated sensor for every configured fuel type."
+          "favorite_stations": "Each selected row creates a dedicated sensor."
         }
       }
     }
