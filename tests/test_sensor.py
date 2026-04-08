@@ -33,14 +33,14 @@ class TestDisplayName:
     def test_informative_nome_prefixed_by_brand(self):
         assert _display_name(self._st("Battipaglia Belvedere", "Q8")) == "Q8 – Battipaglia Belvedere"
 
-    def test_nome_same_as_brand_uses_address(self):
-        result = _display_name(self._st("ENI", "ENI", "Via Roma 1"))
-        assert result == "Eni – Via Roma 1"
+    def test_nome_same_as_brand_uses_comune(self):
+        result = _display_name(self._st("ENI", "ENI", "Via Roma 1", comune="Battipaglia"))
+        assert result == "Eni – Battipaglia"
 
-    def test_nome_contained_in_brand_uses_address(self):
+    def test_nome_contained_in_brand_uses_comune(self):
         # "Eni" ⊂ "Agip Eni"
-        result = _display_name(self._st("Eni", "Agip Eni", "Via Napoli 5"))
-        assert result == "Agip Eni – Via Napoli 5"
+        result = _display_name(self._st("Eni", "Agip Eni", "Via Napoli 5", comune="Salerno"))
+        assert result == "Agip Eni – Salerno"
 
     def test_brand_contained_in_nome_uses_address(self):
         # brand "IP" ⊂ nome "IP Station" — still redundant

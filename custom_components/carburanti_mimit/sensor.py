@@ -124,9 +124,8 @@ def _display_name(station: Any) -> str:
     )
 
     if nome_is_brand:
-        # Use address as the distinguishing part (title-case, drop trailing number if desired)
-        addr = indirizzo.title() or (station.comune or "").title()
-        return f"{band_tc} – {addr}" if (band_tc and addr) else (band_tc or addr or f"#{station.id}")
+        loc = (station.comune or "").strip().title()
+        return f"{band_tc} – {loc}" if (band_tc and loc) else (band_tc or loc or f"#{station.id}")
 
     # nome is informative; prefix brand only when nome doesn't already start with it
     if band_tc and not nome_tc.lower().startswith(band_slug):
