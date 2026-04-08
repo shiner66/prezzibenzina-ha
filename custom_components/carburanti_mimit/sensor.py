@@ -61,22 +61,40 @@ async def async_setup_entry(
         entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
         entities.append(insight)
 
-    # New format: list of "station_id:fuel_type" strings (e.g. "1234:Benzina").
-    # Legacy fallback: old format stored plain station IDs → expand with all fuel types.
-    fav_entries: list[str] = entry.options.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
-    if not fav_entries:
-        old_ids: list[int] = entry.options.get(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
-        if old_ids:
-            fav_entries = [f"{sid}:{ft}" for sid in old_ids for ft in fuel_types]
-    for pair in fav_entries:
+    # CONF_FAVORITE_STATIONS: list[int] — station IDs; sensors created for every
+    # configured fuel type (the cross-product is implicit).
+    # Legacy migration: old "id:fuel_type" strings → extract unique IDs.
+    raw_favs = entry.options.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
+    fav_ids: list[int] = []
+    seen: set[int] = set()
+    for item in raw_favs:
         try:
-            sid_str, ft = pair.split(":", 1)
-            station_id = int(sid_str)
-        except (ValueError, AttributeError):
-            _LOGGER.warning("Skipping malformed favorite_stations entry: %r", pair)
+            sid = int(str(item).split(":")[0])
+        except (ValueError, TypeError):
             continue
-        entities.append(FavoriteStationSensor(coordinator, entry, ft, station_id))
+        if sid not in seen:
+            seen.add(sid)
+            fav_ids.append(sid)
 
+    fav_entities: list[FavoriteStationSensor] = []
+    for station_id in fav_ids:
+        for fuel_type in fuel_types:
+            fav_entities.append(FavoriteStationSensor(coordinator, entry, fuel_type, station_id))
+
+    # Remove entity registry entries for favourite sensors no longer configured,
+    # so they don't linger as "unavailable" after options change.
+    try:
+        from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+        ent_reg = er.async_get(hass)
+        new_ids = {e._attr_unique_id for e in fav_entities}
+        for reg_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+            uid = reg_entry.unique_id or ""
+            if f"_{SENSOR_STATION}_" in uid and uid not in new_ids:
+                ent_reg.async_remove(reg_entry.entity_id)
+    except Exception:  # noqa: BLE001
+        pass  # entity registry not available in tests / older HA
+
+    entities.extend(fav_entities)
     async_add_entities(entities)
 
 

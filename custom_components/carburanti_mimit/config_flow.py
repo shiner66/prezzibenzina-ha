@@ -372,29 +372,37 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
     async def async_step_stations_picker(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Step 2 of 2: pick which station × fuel-type pairs become sensors."""
+        """Step 2 of 2: pick which stations become sensors (one entry per station)."""
         opts = self._config_entry.options
 
         if user_input is not None:
-            selected: list[str] = user_input.get(CONF_FAVORITE_STATIONS, [])
+            # SelectSelector returns strings; convert to ints for storage.
+            raw = user_input.get(CONF_FAVORITE_STATIONS, [])
+            selected_ids = [int(x) for x in raw]
             new_options = {
                 **self._config_entry.options,
                 CONF_FUEL_TYPES: self._chosen_fuel_types,
-                CONF_FAVORITE_STATIONS: selected,
+                CONF_FAVORITE_STATIONS: selected_ids,
             }
             return self.async_create_entry(title="", data=new_options)
 
-        pair_options, station_count = self._build_station_options(self._chosen_fuel_types)
-        current: list[str] = opts.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
+        station_options, station_count = self._build_station_options()
+        # Read current IDs; handle both int list (new) and "id:ft" strings (legacy).
+        current_ids: list[str] = []
+        for item in opts.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS):
+            try:
+                current_ids.append(str(int(str(item).split(":")[0])))
+            except (ValueError, TypeError):
+                pass
 
-        # Preserve selections that have temporarily left the radius
-        known_values = {o["value"] for o in pair_options}
-        extra: list[dict[str, str]] = [
-            {"value": pair, "label": f"{pair} (fuori raggio)"}
-            for pair in current
-            if pair not in known_values
+        # Keep previously selected stations not currently in radius
+        known_values = {o["value"] for o in station_options}
+        extra = [
+            {"value": sid, "label": f"Stazione ID {sid} (fuori raggio)"}
+            for sid in current_ids
+            if sid not in known_values
         ]
-        all_options = pair_options + extra
+        all_options = station_options + extra
 
         schema = vol.Schema(
             {
@@ -411,11 +419,8 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         no_data = station_count == 0
         return self.async_show_form(
             step_id="stations_picker",
-            # add_suggested_values_to_schema is the HA-recommended way to
-            # pre-populate SelectSelector checkboxes (vol.Optional default= is
-            # used only for validation, not for frontend pre-selection).
             data_schema=self.add_suggested_values_to_schema(
-                schema, {CONF_FAVORITE_STATIONS: current}
+                schema, {CONF_FAVORITE_STATIONS: current_ids}
             ),
             description_placeholders={
                 "station_count": str(station_count),
@@ -427,10 +432,8 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
-    def _build_station_options(
-        self, fuel_types: list[str]
-    ) -> tuple[list[dict[str, str]], int]:
-        """Return (options, station_count) for the given fuel types."""
+    def _build_station_options(self) -> tuple[list[dict[str, str]], int]:
+        """Return (options, station_count) — one entry per station, no fuel type."""
         try:
             coordinator = self._config_entry.runtime_data.coordinator
             stations = coordinator.data.stations_in_radius if coordinator.data else []
@@ -448,9 +451,5 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             else:
                 display = name_tc or brand
             location = f"{s['comune']} ({s['distance_km']:.1f} km)"
-            for ft in fuel_types:
-                options.append({
-                    "value": f"{s['id']}:{ft}",
-                    "label": f"{display} | {location} — {ft}",
-                })
+            options.append({"value": str(s["id"]), "label": f"{display} | {location}"})
         return options, len(stations)

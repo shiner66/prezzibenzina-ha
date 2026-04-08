@@ -77,12 +77,12 @@
       },
       "stations_picker": {
         "title": "Stazioni preferite",
-        "description": "Seleziona le stazioni da monitorare come sensori individuali. Trovate {station_count} stazioni nel raggio configurato.{no_data_hint}",
+        "description": "Seleziona le stazioni da monitorare. Per ogni stazione verranno creati sensori per tutti i carburanti scelti nel passo precedente. Trovate {station_count} stazioni nel raggio configurato.{no_data_hint}",
         "data": {
           "favorite_stations": "Stazioni preferite"
         },
         "data_description": {
-          "favorite_stations": "Ogni riga selezionata crea un sensore dedicato."
+          "favorite_stations": "Una riga = una stazione. I sensori vengono creati automaticamente per ogni tipo di carburante configurato."
         }
       }
     }

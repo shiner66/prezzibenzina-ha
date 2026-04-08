@@ -77,12 +77,12 @@
       },
       "stations_picker": {
         "title": "Favourite stations",
-        "description": "Select which stations to monitor as individual sensors. Found {station_count} stations within the configured radius.{no_data_hint}",
+        "description": "Select which stations to monitor. Sensors are created for every fuel type chosen in the previous step. Found {station_count} stations within the configured radius.{no_data_hint}",
         "data": {
           "favorite_stations": "Favourite stations"
         },
         "data_description": {
-          "favorite_stations": "Each selected row creates a dedicated sensor."
+          "favorite_stations": "One row = one station. Sensors are created automatically for each configured fuel type."
         }
       }
     }
