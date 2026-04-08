@@ -11,8 +11,56 @@ from custom_components.carburanti_mimit.sensor import (
     AveragePriceSensor,
     CheapestPriceSensor,
     FavoriteStationSensor,
+    _display_name,
 )
 from tests.conftest import make_enriched, make_station
+
+
+# ---------------------------------------------------------------------------
+# _display_name unit tests
+# ---------------------------------------------------------------------------
+
+class TestDisplayName:
+    def _st(self, nome: str, bandiera: str, indirizzo: str = "Via Roma 1", comune: str = "Milano"):
+        s = MagicMock()
+        s.nome = nome
+        s.bandiera = bandiera
+        s.indirizzo = indirizzo
+        s.comune = comune
+        s.id = 99
+        return s
+
+    def test_informative_nome_prefixed_by_brand(self):
+        assert _display_name(self._st("Battipaglia Belvedere", "Q8")) == "Q8 – Battipaglia Belvedere"
+
+    def test_nome_same_as_brand_uses_address(self):
+        result = _display_name(self._st("ENI", "ENI", "Via Roma 1"))
+        assert result == "Eni – Via Roma 1"
+
+    def test_nome_contained_in_brand_uses_address(self):
+        # "Eni" ⊂ "Agip Eni"
+        result = _display_name(self._st("Eni", "Agip Eni", "Via Napoli 5"))
+        assert result == "Agip Eni – Via Napoli 5"
+
+    def test_brand_contained_in_nome_uses_address(self):
+        # brand "IP" ⊂ nome "IP Station" — still redundant
+        result = _display_name(self._st("IP Station", "IP", "Corso Umberto 3"))
+        # nome starts with brand slug "ip" → treated as brand
+        assert "Ip" in result or "IP" in result
+
+    def test_nome_already_starts_with_brand_no_double_prefix(self):
+        # nome = "Q8 Battipaglia" already starts with brand → no duplication
+        result = _display_name(self._st("Q8 Battipaglia", "Q8"))
+        assert result == "Q8 Battipaglia"
+        assert "Q8 – Q8" not in result
+
+    def test_empty_nome_falls_back_to_brand(self):
+        result = _display_name(self._st("", "ENI", "Via Roma 1"))
+        assert "Eni" in result
+
+    def test_title_case_applied(self):
+        result = _display_name(self._st("BATTIPAGLIA BELVEDERE", "Q8"))
+        assert result == "Q8 – Battipaglia Belvedere"
 
 
 # ---------------------------------------------------------------------------

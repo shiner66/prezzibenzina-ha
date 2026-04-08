@@ -92,14 +92,45 @@ def _area(coordinator: CarburantiMimitCoordinator, fuel_type: str) -> FuelAreaDa
 
 
 def _display_name(station: Any) -> str:
-    """Return a human-readable station name: title-case nome, prefixed by brand if distinct."""
-    nome: str = station.nome or ""
-    bandiera: str = station.bandiera or ""
-    nome_tc = nome.title()
+    """Return a human-readable station name suitable for entity names.
+
+    Logic:
+    - If nome is informative (not just the brand repeated): "{brand} – {nome}"
+    - If nome is essentially the brand (uninformative): "{brand} – {address}"
+    - Falls back to brand alone, then station id.
+
+    Examples:
+        bandiera="Q8",       nome="Battipaglia Belvedere" → "Q8 – Battipaglia Belvedere"
+        bandiera="Agip Eni", nome="Eni"                  → "Agip Eni – Via Roma 1"
+        bandiera="ENI",      nome="ENI"                  → "Eni – Via Roma 1"
+    """
+    nome: str = (station.nome or "").strip()
+    bandiera: str = (station.bandiera or "").strip()
+    indirizzo: str = (station.indirizzo or "").strip()
+
     band_tc = bandiera.title()
-    # Avoid duplicating brand when nome already starts with it (e.g. "Eni Via Roma")
-    if band_tc and not nome_tc.lower().startswith(band_tc.lower()):
-        return f"{band_tc} – {nome_tc}" if nome_tc else band_tc
+    nome_tc = nome.title()
+
+    # nome is "uninformative" when it equals the brand or is a substring of it
+    # (ignoring spaces and case: "Eni" ⊂ "Agip Eni", "ENI" == "ENI").
+    # We do NOT consider it uninformative when brand ⊂ nome — that means the
+    # nome has extra info (e.g. "Q8 Battipaglia Belvedere").
+    nome_slug = nome.lower().replace(" ", "")
+    band_slug = bandiera.lower().replace(" ", "")
+    nome_is_brand = (
+        not nome_slug
+        or nome_slug == band_slug
+        or nome_slug in band_slug
+    )
+
+    if nome_is_brand:
+        # Use address as the distinguishing part (title-case, drop trailing number if desired)
+        addr = indirizzo.title() or (station.comune or "").title()
+        return f"{band_tc} – {addr}" if (band_tc and addr) else (band_tc or addr or f"#{station.id}")
+
+    # nome is informative; prefix brand only when nome doesn't already start with it
+    if band_tc and not nome_tc.lower().startswith(band_slug):
+        return f"{band_tc} – {nome_tc}"
     return nome_tc or band_tc or f"#{station.id}"
 
 
