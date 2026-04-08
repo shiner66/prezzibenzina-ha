@@ -190,7 +190,8 @@ class TestFavoriteStationSensor:
 
     def test_attributes_has_correct_station_name(self):
         attrs = self._sensor(2).extra_state_attributes
-        assert attrs["station_name"] == "Stazione 2"
+        # _display_name prefixes bandiera when nome doesn't start with it
+        assert "Stazione 2" in attrs["station_name"]
 
     def test_attributes_empty_for_unknown_station(self):
         assert self._sensor(99, n=3).extra_state_attributes == {}
@@ -228,7 +229,7 @@ class TestFavoriteStationSensor:
     def test_placeholders_with_known_station(self):
         placeholders = self._sensor(1)._attr_translation_placeholders
         assert placeholders["fuel_type"] == "Benzina"
-        assert placeholders["station_name"] == "Stazione 1"
+        assert "Stazione 1" in placeholders["station_name"]
 
     def test_placeholders_fallback_when_no_data(self):
         coord = MagicMock()

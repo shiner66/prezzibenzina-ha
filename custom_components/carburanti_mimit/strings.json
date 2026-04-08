@@ -106,7 +106,7 @@
         "name": "{fuel_type} – Analisi AI"
       },
       "station": {
-        "name": "{fuel_type} – {station_name}"
+        "name": "{station_name} – {fuel_type}"
       }
     }
   },

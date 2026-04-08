@@ -18,8 +18,10 @@ from .const import (
     CONF_AI_API_KEY,
     CONF_AI_PROVIDER,
     CONF_FAVORITE_STATION_IDS,
+    CONF_FAVORITE_STATIONS,
     CONF_FUEL_TYPES,
     DEFAULT_FAVORITE_STATION_IDS,
+    DEFAULT_FAVORITE_STATIONS,
     DEFAULT_FUEL_TYPES,
     FUEL_UNITS,
     SENSOR_AI_INSIGHT,
@@ -59,10 +61,21 @@ async def async_setup_entry(
         entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
         entities.append(insight)
 
-    fav_ids: list[int] = entry.options.get(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
-    for station_id in fav_ids:
-        for fuel_type in fuel_types:
-            entities.append(FavoriteStationSensor(coordinator, entry, fuel_type, station_id))
+    # New format: list of "station_id:fuel_type" strings (e.g. "1234:Benzina").
+    # Legacy fallback: old format stored plain station IDs → expand with all fuel types.
+    fav_entries: list[str] = entry.options.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
+    if not fav_entries:
+        old_ids: list[int] = entry.options.get(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
+        if old_ids:
+            fav_entries = [f"{sid}:{ft}" for sid in old_ids for ft in fuel_types]
+    for pair in fav_entries:
+        try:
+            sid_str, ft = pair.split(":", 1)
+            station_id = int(sid_str)
+        except (ValueError, AttributeError):
+            _LOGGER.warning("Skipping malformed favorite_stations entry: %r", pair)
+            continue
+        entities.append(FavoriteStationSensor(coordinator, entry, ft, station_id))
 
     async_add_entities(entities)
 
@@ -76,6 +89,18 @@ def _area(coordinator: CarburantiMimitCoordinator, fuel_type: str) -> FuelAreaDa
     if coordinator.data is None:
         return None
     return coordinator.data.by_fuel.get(fuel_type)
+
+
+def _display_name(station: Any) -> str:
+    """Return a human-readable station name: title-case nome, prefixed by brand if distinct."""
+    nome: str = station.nome or ""
+    bandiera: str = station.bandiera or ""
+    nome_tc = nome.title()
+    band_tc = bandiera.title()
+    # Avoid duplicating brand when nome already starts with it (e.g. "Eni Via Roma")
+    if band_tc and not nome_tc.lower().startswith(band_tc.lower()):
+        return f"{band_tc} – {nome_tc}" if nome_tc else band_tc
+    return nome_tc or band_tc or f"#{station.id}"
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +686,9 @@ class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
         )
         self._attr_translation_placeholders = {
             "fuel_type": fuel_type,
-            "station_name": eager_station.station.nome if eager_station else f"#{station_id}",
+            "station_name": (
+                _display_name(eager_station.station) if eager_station else f"#{station_id}"
+            ),
         }
 
     def _handle_coordinator_update(self) -> None:
@@ -670,7 +697,7 @@ class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
         if s:
             self._attr_translation_placeholders = {
                 "fuel_type": self._fuel_type,
-                "station_name": s.station.nome,
+                "station_name": _display_name(s.station),
             }
         super()._handle_coordinator_update()
 
@@ -701,7 +728,7 @@ class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
             return {}
         return {
             "station_id": self._station_id,
-            "station_name": s.station.nome,
+            "station_name": _display_name(s.station),
             "address": s.station.indirizzo,
             "comune": s.station.comune,
             "provincia": s.station.provincia,

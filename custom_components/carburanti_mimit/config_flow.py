@@ -17,7 +17,7 @@ from .const import (
     ALL_FUEL_TYPES,
     CONF_AI_API_KEY,
     CONF_AI_PROVIDER,
-    CONF_FAVORITE_STATION_IDS,
+    CONF_FAVORITE_STATIONS,
     CONF_FUEL_TYPES,
     CONF_INCLUDE_SELF,
     CONF_INCLUDE_SERVITO,
@@ -28,7 +28,7 @@ from .const import (
     CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
     CONF_UPDATE_INTERVAL_H,
     CONF_USE_COMMUNITY_PRICES,
-    DEFAULT_FAVORITE_STATION_IDS,
+    DEFAULT_FAVORITE_STATIONS,
     DEFAULT_FUEL_TYPES,
     DEFAULT_INCLUDE_SELF,
     DEFAULT_INCLUDE_SERVITO,
@@ -164,7 +164,7 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
             )
             # Favorite stations are configured post-setup via Options (stations step)
-            self._options.setdefault(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
+            self._options.setdefault(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
 
             title = self._options.pop("entry_title", "Carburanti")
             return self.async_create_entry(
@@ -267,7 +267,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
                 CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
             }
-            new_options.setdefault(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
+            new_options.setdefault(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
             return self.async_create_entry(title="", data=new_options)
 
         schema = vol.Schema(
@@ -347,38 +347,36 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
     async def async_step_stations(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Let the user pick which stations within the radius to pin as sensors."""
+        """Let the user pick which station × fuel-type pairs to pin as sensors.
+
+        Options are encoded as "station_id:fuel_type" strings so each row in
+        the list represents one sensor (one station, one fuel type).
+        """
         opts = self._config_entry.options
 
         if user_input is not None:
-            raw_ids = user_input.get(CONF_FAVORITE_STATION_IDS, [])
-            new_options = {
-                **opts,
-                CONF_FAVORITE_STATION_IDS: [int(x) for x in raw_ids],
-            }
+            selected: list[str] = user_input.get(CONF_FAVORITE_STATIONS, [])
+            new_options = {**opts, CONF_FAVORITE_STATIONS: selected}
             return self.async_create_entry(title="", data=new_options)
 
-        # Build station list from coordinator's last snapshot
-        station_options = self._build_station_options()
-        current_ids = [
-            str(i)
-            for i in opts.get(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
-        ]
+        # Build the flat list of "station_id:fuel_type" options
+        pair_options, station_count = self._build_station_options()
+        current: list[str] = opts.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
 
-        # Keep previously selected IDs even if they've temporarily left the radius.
-        known_ids = {opt["value"] for opt in station_options}
+        # Preserve selections that have temporarily left the radius
+        known_values = {o["value"] for o in pair_options}
         extra: list[dict[str, str]] = [
-            {"value": sid, "label": f"Stazione ID {sid} (fuori raggio)"}
-            for sid in current_ids
-            if sid not in known_ids
+            {"value": pair, "label": f"{pair} (fuori raggio)"}
+            for pair in current
+            if pair not in known_values
         ]
-        all_options = station_options + extra
+        all_options = pair_options + extra
 
         schema = vol.Schema(
             {
                 vol.Optional(
-                    CONF_FAVORITE_STATION_IDS,
-                    default=current_ids,
+                    CONF_FAVORITE_STATIONS,
+                    default=current,
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=all_options,
@@ -389,12 +387,12 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             }
         )
 
-        no_data = not station_options
+        no_data = station_count == 0
         return self.async_show_form(
             step_id="stations",
             data_schema=schema,
             description_placeholders={
-                "station_count": str(len(station_options)),
+                "station_count": str(station_count),
                 "no_data_hint": (
                     " ⚠️ Nessuna stazione disponibile: esegui un aggiornamento manuale e riapri le opzioni."
                     if no_data
@@ -403,21 +401,34 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
-    def _build_station_options(self) -> list[dict[str, str]]:
-        """Build SelectSelector options from coordinator's stations snapshot."""
+    def _build_station_options(self) -> tuple[list[dict[str, str]], int]:
+        """Return (options, station_count) from the coordinator's live snapshot.
+
+        Each option value is "station_id:fuel_type" so the user picks individual
+        combinations rather than whole stations.
+        """
         try:
             coordinator = self._config_entry.runtime_data.coordinator
             stations = coordinator.data.stations_in_radius if coordinator.data else []
+            fuel_types: list[str] = self._config_entry.options.get(
+                CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES
+            )
         except AttributeError:
-            stations = []
+            return [], 0
 
-        return [
-            {
-                "value": str(s["id"]),
-                "label": (
-                    f"{s['bandiera']} | {s['name']}"
-                    f" – {s['comune']} ({s['distance_km']:.1f} km)"
-                ),
-            }
-            for s in stations
-        ]
+        options: list[dict[str, str]] = []
+        for s in stations:
+            name_tc = s["name"].title()
+            brand = s["bandiera"].title()
+            # Only show brand prefix when the name doesn't already start with it
+            if brand and not name_tc.lower().startswith(brand.lower()):
+                display = f"{brand} – {name_tc}"
+            else:
+                display = name_tc or brand
+            location = f"{s['comune']} ({s['distance_km']:.1f} km)"
+            for ft in fuel_types:
+                options.append({
+                    "value": f"{s['id']}:{ft}",
+                    "label": f"{display} | {location} — {ft}",
+                })
+        return options, len(stations)
