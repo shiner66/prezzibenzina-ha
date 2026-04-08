@@ -44,7 +44,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "Opzioni Carburanti MIMIT",
+        "title": "Carburanti MIMIT",
+        "menu_options": {
+          "general": "Impostazioni generali",
+          "stations": "Stazioni preferite"
+        }
+      },
+      "general": {
+        "title": "Impostazioni generali",
         "data": {
           "radius_km": "Raggio di ricerca (km)",
           "fuel_types": "Tipi di carburante",
@@ -52,11 +59,30 @@
           "include_servito": "Includi servito",
           "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
+          "use_community_prices": "Usa prezzi community",
+          "update_interval_community_min": "Intervallo aggiornamento community (min)",
           "ai_provider": "Provider AI (opzionale)",
           "ai_api_key": "Chiave API AI"
         },
         "data_description": {
           "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
+        }
+      },
+      "stations": {
+        "title": "Carburanti da monitorare",
+        "description": "Scegli i tipi di carburante che ti interessano. La selezione si applica sia ai sensori di classifica sia alle stazioni preferite.",
+        "data": {
+          "fuel_types": "Tipi di carburante"
+        }
+      },
+      "stations_picker": {
+        "title": "Stazioni preferite",
+        "description": "Seleziona le stazioni da monitorare. Per ogni stazione verranno creati sensori per tutti i carburanti scelti nel passo precedente. Trovate {station_count} stazioni nel raggio configurato.{no_data_hint}",
+        "data": {
+          "favorite_stations": "Stazioni preferite"
+        },
+        "data_description": {
+          "favorite_stations": "Una riga = una stazione. I sensori vengono creati automaticamente per ogni tipo di carburante configurato."
         }
       }
     }
@@ -85,6 +111,9 @@
       },
       "ai_insight": {
         "name": "{fuel_type} – Analisi AI"
+      },
+      "station": {
+        "name": "{station_name} – {fuel_type}"
       }
     }
   },

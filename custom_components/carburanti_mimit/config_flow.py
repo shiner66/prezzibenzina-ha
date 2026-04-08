@@ -17,6 +17,7 @@ from .const import (
     ALL_FUEL_TYPES,
     CONF_AI_API_KEY,
     CONF_AI_PROVIDER,
+    CONF_FAVORITE_STATIONS,
     CONF_FUEL_TYPES,
     CONF_INCLUDE_SELF,
     CONF_INCLUDE_SERVITO,
@@ -27,6 +28,7 @@ from .const import (
     CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
     CONF_UPDATE_INTERVAL_H,
     CONF_USE_COMMUNITY_PRICES,
+    DEFAULT_FAVORITE_STATIONS,
     DEFAULT_FUEL_TYPES,
     DEFAULT_INCLUDE_SELF,
     DEFAULT_INCLUDE_SERVITO,
@@ -161,6 +163,8 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._options[CONF_UPDATE_INTERVAL_COMMUNITY_MIN] = int(
                 user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
             )
+            # Favorite stations are configured post-setup via Options (stations step)
+            self._options.setdefault(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
 
             title = self._options.pop("entry_title", "Carburanti")
             return self.async_create_entry(
@@ -219,67 +223,82 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
-    """Allow reconfiguring mutable options post-setup."""
+    """Menu-based options flow: general settings | favourite station picker."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._config_entry = config_entry
+        # Set in async_step_stations (fuel-type sub-step), consumed by async_step_stations_picker
+        self._chosen_fuel_types: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Root menu
+    # ------------------------------------------------------------------
 
     async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["general", "stations"],
+        )
+
+    # ------------------------------------------------------------------
+    # Menu option A — general settings
+    # ------------------------------------------------------------------
+
+    async def async_step_general(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         opts = self._config_entry.options
 
         if user_input is not None:
-            return self.async_create_entry(
-                title="",
-                data={
-                    CONF_RADIUS_KM: int(user_input[CONF_RADIUS_KM]),
-                    CONF_FUEL_TYPES: user_input[CONF_FUEL_TYPES],
-                    CONF_INCLUDE_SELF: user_input[CONF_INCLUDE_SELF],
-                    CONF_INCLUDE_SERVITO: user_input[CONF_INCLUDE_SERVITO],
-                    CONF_TOP_N: int(user_input[CONF_TOP_N]),
-                    CONF_UPDATE_INTERVAL_H: int(user_input[CONF_UPDATE_INTERVAL_H]),
-                    CONF_USE_COMMUNITY_PRICES: user_input.get(
-                        CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
-                    ),
-                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN: int(
-                        user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
-                    ),
-                    CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
-                    CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
-                },
-            )
+            # Re-read options at save time so we don't overwrite favourite_stations
+            # that may have been saved in a previous step of the same HA session.
+            current_opts = self._config_entry.options
+            new_options = {
+                **current_opts,  # preserve favourite_stations and any future keys
+                CONF_RADIUS_KM: int(user_input[CONF_RADIUS_KM]),
+                CONF_FUEL_TYPES: user_input[CONF_FUEL_TYPES],
+                CONF_INCLUDE_SELF: user_input[CONF_INCLUDE_SELF],
+                CONF_INCLUDE_SERVITO: user_input[CONF_INCLUDE_SERVITO],
+                CONF_TOP_N: int(user_input[CONF_TOP_N]),
+                CONF_UPDATE_INTERVAL_H: int(user_input[CONF_UPDATE_INTERVAL_H]),
+                CONF_USE_COMMUNITY_PRICES: user_input.get(
+                    CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES
+                ),
+                CONF_UPDATE_INTERVAL_COMMUNITY_MIN: int(
+                    user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
+                ),
+                CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
+                CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
+            }
+            new_options.setdefault(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
+            return self.async_create_entry(title="", data=new_options)
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_RADIUS_KM, default=opts.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM)): selector.NumberSelector(
+                vol.Required(CONF_RADIUS_KM): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=100, step=1, mode="slider", unit_of_measurement="km")
                 ),
-                vol.Required(CONF_FUEL_TYPES, default=opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)): selector.SelectSelector(
+                vol.Required(CONF_FUEL_TYPES): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[{"value": ft, "label": ft} for ft in ALL_FUEL_TYPES],
                         multiple=True,
                     )
                 ),
-                vol.Required(CONF_INCLUDE_SELF, default=opts.get(CONF_INCLUDE_SELF, DEFAULT_INCLUDE_SELF)): selector.BooleanSelector(),
-                vol.Required(CONF_INCLUDE_SERVITO, default=opts.get(CONF_INCLUDE_SERVITO, DEFAULT_INCLUDE_SERVITO)): selector.BooleanSelector(),
-                vol.Required(CONF_TOP_N, default=opts.get(CONF_TOP_N, DEFAULT_TOP_N)): selector.NumberSelector(
+                vol.Required(CONF_INCLUDE_SELF): selector.BooleanSelector(),
+                vol.Required(CONF_INCLUDE_SERVITO): selector.BooleanSelector(),
+                vol.Required(CONF_TOP_N): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=20, step=1, mode="slider")
                 ),
-                vol.Required(CONF_UPDATE_INTERVAL_H, default=opts.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H)): selector.NumberSelector(
+                vol.Required(CONF_UPDATE_INTERVAL_H): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=24, step=1, mode="slider", unit_of_measurement="h")
                 ),
-                vol.Required(
-                    CONF_USE_COMMUNITY_PRICES,
-                    default=opts.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
-                    default=opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN),
-                ): selector.NumberSelector(
+                vol.Required(CONF_USE_COMMUNITY_PRICES): selector.BooleanSelector(),
+                vol.Required(CONF_UPDATE_INTERVAL_COMMUNITY_MIN): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=5, max=60, step=5, mode="slider", unit_of_measurement="min")
                 ),
-                vol.Optional(CONF_AI_PROVIDER, default=opts.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE)): selector.SelectSelector(
+                vol.Optional(CONF_AI_PROVIDER): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[
                             {"value": p, "label": _AI_PROVIDER_LABELS.get(p, p)}
@@ -288,10 +307,149 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                         multiple=False,
                     )
                 ),
-                vol.Optional(CONF_AI_API_KEY, default=opts.get(CONF_AI_API_KEY, "")): selector.TextSelector(
+                vol.Optional(CONF_AI_API_KEY): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="general",
+            data_schema=self.add_suggested_values_to_schema(
+                schema,
+                {
+                    CONF_RADIUS_KM: opts.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM),
+                    CONF_FUEL_TYPES: opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES),
+                    CONF_INCLUDE_SELF: opts.get(CONF_INCLUDE_SELF, DEFAULT_INCLUDE_SELF),
+                    CONF_INCLUDE_SERVITO: opts.get(CONF_INCLUDE_SERVITO, DEFAULT_INCLUDE_SERVITO),
+                    CONF_TOP_N: opts.get(CONF_TOP_N, DEFAULT_TOP_N),
+                    CONF_UPDATE_INTERVAL_H: opts.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H),
+                    CONF_USE_COMMUNITY_PRICES: opts.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES),
+                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN: opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN),
+                    CONF_AI_PROVIDER: opts.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
+                    CONF_AI_API_KEY: opts.get(CONF_AI_API_KEY, ""),
+                },
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Menu option B — step 1: choose fuel types globally
+    # ------------------------------------------------------------------
+
+    async def async_step_stations(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 1 of 2: choose which fuel types to show in the station picker."""
+        opts = self._config_entry.options
+
+        if user_input is not None:
+            self._chosen_fuel_types = user_input[CONF_FUEL_TYPES]
+            return await self.async_step_stations_picker()
+
+        current_fuel_types: list[str] = opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_FUEL_TYPES): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": ft, "label": ft} for ft in ALL_FUEL_TYPES],
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="stations",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, {CONF_FUEL_TYPES: current_fuel_types}
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Menu option B — step 2: pick station × fuel-type combinations
+    # ------------------------------------------------------------------
+
+    async def async_step_stations_picker(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 2 of 2: pick which stations become sensors (one entry per station)."""
+        opts = self._config_entry.options
+
+        if user_input is not None:
+            # SelectSelector returns strings; convert to ints for storage.
+            raw = user_input.get(CONF_FAVORITE_STATIONS, [])
+            selected_ids = [int(x) for x in raw]
+            new_options = {
+                **self._config_entry.options,
+                CONF_FUEL_TYPES: self._chosen_fuel_types,
+                CONF_FAVORITE_STATIONS: selected_ids,
+            }
+            return self.async_create_entry(title="", data=new_options)
+
+        station_options, station_count = self._build_station_options()
+        # Read current IDs; handle both int list (new) and "id:ft" strings (legacy).
+        current_ids: list[str] = []
+        for item in opts.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS):
+            try:
+                current_ids.append(str(int(str(item).split(":")[0])))
+            except (ValueError, TypeError):
+                pass
+
+        # Keep previously selected stations not currently in radius
+        known_values = {o["value"] for o in station_options}
+        extra = [
+            {"value": sid, "label": f"Stazione ID {sid} (fuori raggio)"}
+            for sid in current_ids
+            if sid not in known_values
+        ]
+        all_options = station_options + extra
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_FAVORITE_STATIONS): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=all_options,
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+            }
+        )
+
+        no_data = station_count == 0
+        return self.async_show_form(
+            step_id="stations_picker",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, {CONF_FAVORITE_STATIONS: current_ids}
+            ),
+            description_placeholders={
+                "station_count": str(station_count),
+                "no_data_hint": (
+                    " ⚠️ Nessuna stazione disponibile: esegui un aggiornamento manuale e riapri le opzioni."
+                    if no_data
+                    else ""
+                ),
+            },
+        )
+
+    def _build_station_options(self) -> tuple[list[dict[str, str]], int]:
+        """Return (options, station_count) — one entry per station, no fuel type."""
+        try:
+            coordinator = self._config_entry.runtime_data.coordinator
+            stations = coordinator.data.stations_in_radius if coordinator.data else []
+        except AttributeError:
+            return [], 0
+
+        options: list[dict[str, str]] = []
+        for s in stations:
+            name_tc = s["name"].title()
+            brand = s["bandiera"].title()
+            brand_slug = brand.lower().replace(" ", "")
+            nome_slug = name_tc.lower().replace(" ", "")
+            if brand and not nome_slug.startswith(brand_slug) and nome_slug not in brand_slug:
+                display = f"{brand} – {name_tc}"
+            else:
+                display = name_tc or brand
+            location = f"{s['comune']} ({s['distance_km']:.1f} km)"
+            options.append({"value": str(s["id"]), "label": f"{display} | {location}"})
+        return options, len(stations)

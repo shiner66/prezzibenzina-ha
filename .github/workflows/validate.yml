@@ -1,51 +1,40 @@
 name: Validate
 
-# Runs on branch pushes and pull requests.
-# Tag pushes are handled by release.yml (which also validates before publishing).
+# Runs on every branch push and pull requests targeting main.
+# Tag pushes are handled by release.yml which also validates before publishing.
 on:
   push:
-    branches: ["main", "claude/**"]
+    branches: ["main", "claude/**", "feature/**", "fix/**", "release/**"]
     tags-ignore: ["v*"]
   pull_request:
     branches: ["main"]
 
 jobs:
   hassfest:
-    name: Hassfest validation
+    name: Hassfest
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run hassfest
-        uses: home-assistant/actions/hassfest@master
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
 
   hacs:
-    name: HACS validation
+    name: HACS
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: HACS validation
-        uses: hacs/action@main
-        # continue-on-error is intentional: HACS validation requires:
-        #   1. At least one published GitHub release (chicken-and-egg on first run)
-        #   2. The "hacshomeassistant" topic set on the repository (GitHub UI setting)
-        # Code-level issues (manifest, file structure) will still surface in the logs.
+      - uses: actions/checkout@v4
+      # continue-on-error: first run requires a published release + repository topic
+      - uses: hacs/action@main
         continue-on-error: true
         with:
           category: integration
 
   lint:
-    name: Lint JSON/YAML
+    name: Lint (JSON / YAML / Python)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -61,3 +50,27 @@ jobs:
           for f in $(find . -name "*.yaml" -o -name "*.yml" | grep -v ".git"); do
             python -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f" || exit 1
           done
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r requirements_test.txt
+
+      - name: Run pytest
+        run: python -m pytest tests/ -v --tb=short
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .coverage
+          if-no-files-found: ignore

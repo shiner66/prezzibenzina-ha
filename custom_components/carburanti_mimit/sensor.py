@@ -17,7 +17,11 @@ from .const import (
     AI_PROVIDER_NONE,
     CONF_AI_API_KEY,
     CONF_AI_PROVIDER,
+    CONF_FAVORITE_STATION_IDS,
+    CONF_FAVORITE_STATIONS,
     CONF_FUEL_TYPES,
+    DEFAULT_FAVORITE_STATION_IDS,
+    DEFAULT_FAVORITE_STATIONS,
     DEFAULT_FUEL_TYPES,
     FUEL_UNITS,
     SENSOR_AI_INSIGHT,
@@ -25,6 +29,7 @@ from .const import (
     SENSOR_CHEAPEST,
     SENSOR_PREDICTION,
     SENSOR_PREDICTION_3D,
+    SENSOR_STATION,
     SENSOR_TREND,
     URL_PB_STATION,
 )
@@ -56,6 +61,40 @@ async def async_setup_entry(
         entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
         entities.append(insight)
 
+    # CONF_FAVORITE_STATIONS: list[int] — station IDs; sensors created for every
+    # configured fuel type (the cross-product is implicit).
+    # Legacy migration: old "id:fuel_type" strings → extract unique IDs.
+    raw_favs = entry.options.get(CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS)
+    fav_ids: list[int] = []
+    seen: set[int] = set()
+    for item in raw_favs:
+        try:
+            sid = int(str(item).split(":")[0])
+        except (ValueError, TypeError):
+            continue
+        if sid not in seen:
+            seen.add(sid)
+            fav_ids.append(sid)
+
+    fav_entities: list[FavoriteStationSensor] = []
+    for station_id in fav_ids:
+        for fuel_type in fuel_types:
+            fav_entities.append(FavoriteStationSensor(coordinator, entry, fuel_type, station_id))
+
+    # Remove entity registry entries for favourite sensors no longer configured,
+    # so they don't linger as "unavailable" after options change.
+    try:
+        from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+        ent_reg = er.async_get(hass)
+        new_ids = {e._attr_unique_id for e in fav_entities}
+        for reg_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+            uid = reg_entry.unique_id or ""
+            if f"_{SENSOR_STATION}_" in uid and uid not in new_ids:
+                ent_reg.async_remove(reg_entry.entity_id)
+    except Exception:  # noqa: BLE001
+        pass  # entity registry not available in tests / older HA
+
+    entities.extend(fav_entities)
     async_add_entities(entities)
 
 
@@ -68,6 +107,48 @@ def _area(coordinator: CarburantiMimitCoordinator, fuel_type: str) -> FuelAreaDa
     if coordinator.data is None:
         return None
     return coordinator.data.by_fuel.get(fuel_type)
+
+
+def _display_name(station: Any) -> str:
+    """Return a human-readable station name suitable for entity names.
+
+    Logic:
+    - If nome is informative (not just the brand repeated): "{brand} – {nome}"
+    - If nome is essentially the brand (uninformative): "{brand} – {address}"
+    - Falls back to brand alone, then station id.
+
+    Examples:
+        bandiera="Q8",       nome="Battipaglia Belvedere" → "Q8 – Battipaglia Belvedere"
+        bandiera="Agip Eni", nome="Eni"                  → "Agip Eni – Via Roma 1"
+        bandiera="ENI",      nome="ENI"                  → "Eni – Via Roma 1"
+    """
+    nome: str = (station.nome or "").strip()
+    bandiera: str = (station.bandiera or "").strip()
+    indirizzo: str = (station.indirizzo or "").strip()
+
+    band_tc = bandiera.title()
+    nome_tc = nome.title()
+
+    # nome is "uninformative" when it equals the brand or is a substring of it
+    # (ignoring spaces and case: "Eni" ⊂ "Agip Eni", "ENI" == "ENI").
+    # We do NOT consider it uninformative when brand ⊂ nome — that means the
+    # nome has extra info (e.g. "Q8 Battipaglia Belvedere").
+    nome_slug = nome.lower().replace(" ", "")
+    band_slug = bandiera.lower().replace(" ", "")
+    nome_is_brand = (
+        not nome_slug
+        or nome_slug == band_slug
+        or nome_slug in band_slug
+    )
+
+    if nome_is_brand:
+        loc = (station.comune or "").strip().title()
+        return f"{band_tc} – {loc}" if (band_tc and loc) else (band_tc or loc or f"#{station.id}")
+
+    # nome is informative; prefix brand only when nome doesn't already start with it
+    if band_tc and not nome_tc.lower().startswith(band_slug):
+        return f"{band_tc} – {nome_tc}"
+    return nome_tc or band_tc or f"#{station.id}"
 
 
 # ---------------------------------------------------------------------------
@@ -607,3 +688,117 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         if pred:
             self._statistical_confidence = pred.confidence
         super()._handle_coordinator_update()
+
+
+# ---------------------------------------------------------------------------
+# Individual (favorite) station sensors
+# ---------------------------------------------------------------------------
+
+class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
+    """Sensor pinned to a specific station chosen by the user.
+
+    Created for each station_id in CONF_FAVORITE_STATION_IDS × each fuel type.
+    The station is looked up by ID in FuelAreaData.all_stations so it stays
+    current across price updates and is not limited to the top-N ranking.
+
+    State  → current price at that station (float, EUR/L or EUR/kg)
+    Attributes → full station details: name, address, distance, bandiera, etc.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 3
+
+    def __init__(
+        self,
+        coordinator: CarburantiMimitCoordinator,
+        config_entry: ConfigEntry,
+        fuel_type: str,
+        station_id: int,
+    ) -> None:
+        super().__init__(coordinator, config_entry, fuel_type)
+        self._station_id = station_id
+        self._attr_unique_id = (
+            f"{config_entry.entry_id}_{fuel_type}_{SENSOR_STATION}_{station_id}"
+        )
+        self._attr_translation_key = SENSOR_STATION
+        self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
+        # HA metaclass forbids overriding _attr_* as @property, so we use a
+        # plain instance attribute. Resolve the real name eagerly if coordinator
+        # data is already present (e.g. after reload); otherwise fall back to the
+        # station ID and update it on the first _handle_coordinator_update call.
+        area = _area(coordinator, fuel_type)
+        eager_station = (
+            next((s for s in area.all_stations if s.station.id == station_id), None)
+            if area
+            else None
+        )
+        self._attr_translation_placeholders = {
+            "fuel_type": fuel_type,
+            "station_name": (
+                _display_name(eager_station.station) if eager_station else f"#{station_id}"
+            ),
+        }
+
+    def _handle_coordinator_update(self) -> None:
+        """Refresh translation placeholder with the real station name."""
+        s = self._get_enriched()
+        if s:
+            self._attr_translation_placeholders = {
+                "fuel_type": self._fuel_type,
+                "station_name": _display_name(s.station),
+            }
+        super()._handle_coordinator_update()
+
+    def _get_enriched(self):
+        """Return the EnrichedStation for this station_id and fuel_type, or None."""
+        area = _area(self.coordinator, self._fuel_type)
+        if not area:
+            return None
+        return next(
+            (s for s in area.all_stations if s.station.id == self._station_id),
+            None,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Available only when the coordinator has a price for this station."""
+        return self._get_enriched() is not None
+
+    @property
+    def native_value(self) -> float | None:
+        s = self._get_enriched()
+        return s.price if s else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        s = self._get_enriched()
+        if not s:
+            return {}
+        return {
+            "station_id": self._station_id,
+            "station_name": _display_name(s.station),
+            "address": s.station.indirizzo,
+            "comune": s.station.comune,
+            "provincia": s.station.provincia,
+            "bandiera": s.station.bandiera,
+            "distance_km": round(s.distance_km, 2),
+            "is_self_service": s.is_self,
+            "reported_at": s.reported_at.isoformat(),
+            "community_price_self": s.community_price_self,
+            "community_price_servito": s.community_price_servito,
+            "community_updated_at": (
+                s.community_updated_at.isoformat() if s.community_updated_at else None
+            ),
+            "community_is_user_reported": s.community_is_user_reported,
+            "station_url": URL_PB_STATION.format(station_id=s.station.id),
+            "last_updated": (
+                self.coordinator.data.last_updated.isoformat()
+                if self.coordinator.data
+                else None
+            ),
+            "data_source": (
+                self.coordinator.data.data_source
+                if self.coordinator.data
+                else None
+            ),
+        }

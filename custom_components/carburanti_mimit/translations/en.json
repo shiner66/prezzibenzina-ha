@@ -28,6 +28,9 @@
           "update_interval_h": "Update interval (hours)",
           "ai_provider": "AI provider (optional)",
           "ai_api_key": "AI API key"
+        },
+        "data_description": {
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
         }
       }
     },
@@ -41,7 +44,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "Carburanti MIMIT options",
+        "title": "Carburanti MIMIT",
+        "menu_options": {
+          "general": "General settings",
+          "stations": "Favourite stations"
+        }
+      },
+      "general": {
+        "title": "General settings",
         "data": {
           "radius_km": "Search radius (km)",
           "fuel_types": "Fuel types",
@@ -49,8 +59,30 @@
           "include_servito": "Include full-service",
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
+          "use_community_prices": "Use community prices",
+          "update_interval_community_min": "Community update interval (min)",
           "ai_provider": "AI provider (optional)",
           "ai_api_key": "AI API key"
+        },
+        "data_description": {
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
+        }
+      },
+      "stations": {
+        "title": "Fuel types to monitor",
+        "description": "Choose which fuel types you care about. This applies to both ranking sensors and the favourite station picker.",
+        "data": {
+          "fuel_types": "Fuel types"
+        }
+      },
+      "stations_picker": {
+        "title": "Favourite stations",
+        "description": "Select which stations to monitor. Sensors are created for every fuel type chosen in the previous step. Found {station_count} stations within the configured radius.{no_data_hint}",
+        "data": {
+          "favorite_stations": "Favourite stations"
+        },
+        "data_description": {
+          "favorite_stations": "One row = one station. Sensors are created automatically for each configured fuel type."
         }
       }
     }
@@ -79,6 +111,9 @@
       },
       "ai_insight": {
         "name": "{fuel_type} – AI Insight"
+      },
+      "station": {
+        "name": "{station_name} – {fuel_type}"
       }
     }
   },
