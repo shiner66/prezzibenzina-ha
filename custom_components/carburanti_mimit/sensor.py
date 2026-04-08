@@ -18,13 +18,18 @@ from .const import (
     CONF_AI_API_KEY,
     CONF_AI_PROVIDER,
     CONF_FUEL_TYPES,
+    CONF_SHOW_INDIVIDUAL_STATIONS,
+    CONF_TOP_N,
     DEFAULT_FUEL_TYPES,
+    DEFAULT_SHOW_INDIVIDUAL_STATIONS,
+    DEFAULT_TOP_N,
     FUEL_UNITS,
     SENSOR_AI_INSIGHT,
     SENSOR_AVERAGE,
     SENSOR_CHEAPEST,
     SENSOR_PREDICTION,
     SENSOR_PREDICTION_3D,
+    SENSOR_STATION,
     SENSOR_TREND,
     URL_PB_STATION,
 )
@@ -55,6 +60,12 @@ async def async_setup_entry(
         entities.append(pred)
         entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
         entities.append(insight)
+
+    if entry.options.get(CONF_SHOW_INDIVIDUAL_STATIONS, DEFAULT_SHOW_INDIVIDUAL_STATIONS):
+        top_n = entry.options.get(CONF_TOP_N, DEFAULT_TOP_N)
+        for fuel_type in fuel_types:
+            for rank in range(1, int(top_n) + 1):
+                entities.append(FavoriteStationSensor(coordinator, entry, fuel_type, rank))
 
     async_add_entities(entities)
 
@@ -607,3 +618,86 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
         if pred:
             self._statistical_confidence = pred.confidence
         super()._handle_coordinator_update()
+
+
+# ---------------------------------------------------------------------------
+# Individual (favorite) station sensors
+# ---------------------------------------------------------------------------
+
+class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
+    """Individual sensor for a top-ranked station per fuel type.
+
+    Created when CONF_SHOW_INDIVIDUAL_STATIONS is enabled. One sensor is
+    created per rank (1 … top_n) per fuel type, giving direct access to each
+    station's price and details without unpacking the top_stations attribute.
+
+    State  → current price at that ranked station (float, EUR/L or EUR/kg)
+    Attributes → full station details: name, address, distance, bandiera, etc.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 3
+
+    def __init__(
+        self,
+        coordinator: CarburantiMimitCoordinator,
+        config_entry: ConfigEntry,
+        fuel_type: str,
+        rank: int,
+    ) -> None:
+        super().__init__(coordinator, config_entry, fuel_type)
+        self._rank = rank  # 1-based ranking position
+        self._attr_unique_id = (
+            f"{config_entry.entry_id}_{fuel_type}_{SENSOR_STATION}_{rank}"
+        )
+        self._attr_translation_key = SENSOR_STATION
+        self._attr_translation_placeholders = {"fuel_type": fuel_type, "rank": str(rank)}
+        self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
+
+    @property
+    def available(self) -> bool:
+        """Available only when the ranked station exists in coordinator data."""
+        area = _area(self.coordinator, self._fuel_type)
+        return area is not None and len(area.top_stations) >= self._rank
+
+    @property
+    def native_value(self) -> float | None:
+        area = _area(self.coordinator, self._fuel_type)
+        if not area or len(area.top_stations) < self._rank:
+            return None
+        return area.top_stations[self._rank - 1].price
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        area = _area(self.coordinator, self._fuel_type)
+        if not area or len(area.top_stations) < self._rank:
+            return {}
+        s = area.top_stations[self._rank - 1]
+        return {
+            "rank": self._rank,
+            "station_name": s.station.nome,
+            "address": s.station.indirizzo,
+            "comune": s.station.comune,
+            "provincia": s.station.provincia,
+            "bandiera": s.station.bandiera,
+            "distance_km": round(s.distance_km, 2),
+            "is_self_service": s.is_self,
+            "reported_at": s.reported_at.isoformat(),
+            "community_price_self": s.community_price_self,
+            "community_price_servito": s.community_price_servito,
+            "community_updated_at": (
+                s.community_updated_at.isoformat() if s.community_updated_at else None
+            ),
+            "community_is_user_reported": s.community_is_user_reported,
+            "station_url": URL_PB_STATION.format(station_id=s.station.id),
+            "last_updated": (
+                self.coordinator.data.last_updated.isoformat()
+                if self.coordinator.data
+                else None
+            ),
+            "data_source": (
+                self.coordinator.data.data_source
+                if self.coordinator.data
+                else None
+            ),
+        }

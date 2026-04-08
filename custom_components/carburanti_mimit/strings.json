@@ -27,10 +27,12 @@
           "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
           "ai_provider": "Provider AI (opzionale)",
-          "ai_api_key": "Chiave API AI"
+          "ai_api_key": "Chiave API AI",
+          "show_individual_stations": "Crea sensori individuali per le stazioni in classifica"
         },
         "data_description": {
-          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
+          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato.",
+          "show_individual_stations": "Se abilitato, crea un sensore dedicato per ciascuna stazione nella classifica (1 sensore per stazione × tipo carburante)."
         }
       }
     },
@@ -53,10 +55,12 @@
           "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
           "ai_provider": "Provider AI (opzionale)",
-          "ai_api_key": "Chiave API AI"
+          "ai_api_key": "Chiave API AI",
+          "show_individual_stations": "Crea sensori individuali per le stazioni in classifica"
         },
         "data_description": {
-          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato."
+          "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato.",
+          "show_individual_stations": "Se abilitato, crea un sensore dedicato per ciascuna stazione nella classifica (1 sensore per stazione × tipo carburante)."
         }
       }
     }
@@ -85,6 +89,9 @@
       },
       "ai_insight": {
         "name": "{fuel_type} – Analisi AI"
+      },
+      "station": {
+        "name": "{fuel_type} – Stazione #{rank}"
       }
     }
   },

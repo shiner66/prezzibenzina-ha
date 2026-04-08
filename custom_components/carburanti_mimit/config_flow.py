@@ -23,6 +23,7 @@ from .const import (
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_RADIUS_KM,
+    CONF_SHOW_INDIVIDUAL_STATIONS,
     CONF_TOP_N,
     CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
     CONF_UPDATE_INTERVAL_H,
@@ -31,6 +32,7 @@ from .const import (
     DEFAULT_INCLUDE_SELF,
     DEFAULT_INCLUDE_SERVITO,
     DEFAULT_RADIUS_KM,
+    DEFAULT_SHOW_INDIVIDUAL_STATIONS,
     DEFAULT_TOP_N,
     DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN,
     DEFAULT_UPDATE_INTERVAL_H,
@@ -161,6 +163,9 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._options[CONF_UPDATE_INTERVAL_COMMUNITY_MIN] = int(
                 user_input.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
             )
+            self._options[CONF_SHOW_INDIVIDUAL_STATIONS] = user_input.get(
+                CONF_SHOW_INDIVIDUAL_STATIONS, DEFAULT_SHOW_INDIVIDUAL_STATIONS
+            )
 
             title = self._options.pop("entry_title", "Carburanti")
             return self.async_create_entry(
@@ -198,6 +203,10 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_AI_API_KEY, default=""): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
+                vol.Required(
+                    CONF_SHOW_INDIVIDUAL_STATIONS,
+                    default=DEFAULT_SHOW_INDIVIDUAL_STATIONS,
+                ): selector.BooleanSelector(),
             }
         )
 
@@ -247,6 +256,9 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                     ),
                     CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
                     CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
+                    CONF_SHOW_INDIVIDUAL_STATIONS: user_input.get(
+                        CONF_SHOW_INDIVIDUAL_STATIONS, DEFAULT_SHOW_INDIVIDUAL_STATIONS
+                    ),
                 },
             )
 
@@ -291,6 +303,10 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(CONF_AI_API_KEY, default=opts.get(CONF_AI_API_KEY, "")): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
+                vol.Required(
+                    CONF_SHOW_INDIVIDUAL_STATIONS,
+                    default=opts.get(CONF_SHOW_INDIVIDUAL_STATIONS, DEFAULT_SHOW_INDIVIDUAL_STATIONS),
+                ): selector.BooleanSelector(),
             }
         )
 

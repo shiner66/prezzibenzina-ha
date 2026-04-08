@@ -1,17 +1,19 @@
 name: Release
 
 # Triggers:
-#   push to main                  → stable release with auto-incremented patch version
-#   push to any non-main branch   → beta pre-release for that branch
-#                                    (old beta for the same branch is deleted first)
-#   tag push  vX.Y.Z              → stable release (kept forever, marked as latest)
-#   tag push  vX.Y.Z-*            → explicit pre-release (kept forever)
-#   workflow_dispatch             → manual stable/pre-release from Actions UI
+#   push to main              → stable release, auto-incremented patch version
+#   push to claude/** or feature/**  → beta pre-release (old beta deleted first)
+#   tag push vX.Y.Z           → stable release (kept forever, marked as latest)
+#   tag push vX.Y.Z-*         → explicit pre-release (kept forever)
+#   workflow_dispatch         → manual stable/pre-release from Actions UI
 on:
   push:
     branches:
       - main
-      - "**"
+      - "claude/**"
+      - "feature/**"
+      - "fix/**"
+      - "release/**"
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
@@ -27,26 +29,22 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
-  # 1. Validate — must pass before we publish anything
+  # 1. Validate — must pass before publishing
   # ─────────────────────────────────────────────────────────────────────────
   validate:
-    name: Validate integration
+    name: Validate
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Run hassfest
-        uses: home-assistant/actions/hassfest@master
+      - uses: home-assistant/actions/hassfest@master
 
-      - name: Run HACS validation
-        uses: hacs/action@main
+      - uses: hacs/action@main
         continue-on-error: true
         with:
           category: integration
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -63,8 +61,13 @@ jobs:
             python -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f" || exit 1
           done
 
+      - name: Run tests
+        run: |
+          pip install -r requirements_test.txt
+          python -m pytest tests/ -q --tb=short
+
   # ─────────────────────────────────────────────────────────────────────────
-  # 2. Release — runs only if validate passes
+  # 2. Release — runs only when validate passes
   # ─────────────────────────────────────────────────────────────────────────
   release:
     name: Publish GitHub Release
@@ -72,8 +75,7 @@ jobs:
     needs: validate
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -88,7 +90,7 @@ jobs:
           BASE_VERSION=$(python -c "import json; print(json.load(open('custom_components/carburanti_mimit/manifest.json'))['version'])")
 
           if [ "$EVENT" = "push" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
-            # ── Stable release from main push: auto-increment patch ────
+            # Stable release from main: auto-increment patch
             MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
             MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
             PATCH=$(echo "$BASE_VERSION" | cut -d. -f3 | cut -d- -f1)
@@ -99,9 +101,8 @@ jobs:
             IS_BETA=false
 
           elif [ "$EVENT" = "push" ] && [[ "$REF" == refs/heads/* ]]; then
-            # ── Beta from non-main branch push ─────────────────────────
+            # Beta from non-main branch push
             BRANCH="${GITHUB_REF_NAME}"
-            # Sanitize: replace every / and non-alphanumeric char with -
             BRANCH_SLUG=$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//')
             TAG="beta-${BRANCH_SLUG}"
             VERSION="${BASE_VERSION}-beta.${SHORT_SHA}"
@@ -109,7 +110,7 @@ jobs:
             IS_BETA=true
 
           elif [ "$EVENT" = "workflow_dispatch" ]; then
-            # ── Manual stable/pre-release ──────────────────────────────
+            # Manual stable/pre-release
             VERSION="${{ github.event.inputs.version }}"
             TAG="v${VERSION}"
             IS_BETA=false
@@ -120,7 +121,7 @@ jobs:
             fi
 
           else
-            # ── Tag push ───────────────────────────────────────────────
+            # Tag push
             TAG="${GITHUB_REF_NAME}"
             VERSION="${TAG#v}"
             IS_BETA=false
@@ -169,8 +170,8 @@ jobs:
           git tag -a "$TAG" -m "Beta release ${{ steps.version.outputs.version }}"
           git push origin "$TAG"
 
-      # ── Stable only: create tag for main push or workflow_dispatch ───
-      - name: Create stable tag (main push or workflow_dispatch)
+      # ── Stable only: create tag for main push or workflow_dispatch ────
+      - name: Create stable tag
         if: steps.version.outputs.is_beta != 'true' && (github.event_name == 'workflow_dispatch' || github.ref_name == 'main')
         run: |
           TAG="${{ steps.version.outputs.tag }}"

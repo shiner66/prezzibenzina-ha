@@ -77,6 +77,7 @@ CONF_AI_PROVIDER = "ai_provider"
 CONF_AI_API_KEY = "ai_api_key"
 CONF_USE_COMMUNITY_PRICES = "use_community_prices"
 CONF_UPDATE_INTERVAL_COMMUNITY_MIN = "update_interval_community_min"
+CONF_SHOW_INDIVIDUAL_STATIONS = "show_individual_stations"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -89,6 +90,7 @@ DEFAULT_INCLUDE_SELF = True
 DEFAULT_INCLUDE_SERVITO = True
 DEFAULT_USE_COMMUNITY_PRICES = True
 DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN = 30
+DEFAULT_SHOW_INDIVIDUAL_STATIONS = False
 
 # ---------------------------------------------------------------------------
 # Fuel types (exactly as they appear in descCarburante column of MIMIT CSV)
@@ -157,6 +159,7 @@ SENSOR_TREND = "trend"
 SENSOR_PREDICTION = "prediction"
 SENSOR_PREDICTION_3D = "prediction_3d"
 SENSOR_AI_INSIGHT = "ai_insight"
+SENSOR_STATION = "station"
 
 # ---------------------------------------------------------------------------
 # MIMIT update time (Europe/Rome)
