@@ -22,7 +22,7 @@
       },
       "advanced": {
         "title": "Impostazioni avanzate",
-        "description": "Configura l'intervallo di aggiornamento e l'AI opzionale per l'analisi geopolitica. Media e prezzo minimo usano sempre tutte le stazioni nel raggio.\n\nStima uso token/giorno (config attuale): ~{estimated_daily_tokens}\n{token_status}\n⚠ Billing OpenAI: se una singola richiesta supera il limite giornaliero, l'intera richiesta è fatturata.",
+        "description": "Configura l'intervallo di aggiornamento e l'AI opzionale per l'analisi geopolitica. Media e prezzo minimo usano sempre tutte le stazioni nel raggio.\n\n{token_summary}",
         "data": {
           "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
@@ -32,7 +32,7 @@
         },
         "data_description": {
           "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato.",
-          "ai_model": "Gruppo 2,5M token/giorno free: gpt-4.1-mini, gpt-4o-mini, gpt-5-mini. Gruppo 1M/giorno free (250K tier 1-2): gpt-4.1, gpt-4o, gpt-5. Claude: claude-haiku (economico), claude-sonnet (bilanciato)."
+          "ai_model": "Raccomandato: gpt-4.1-mini (gruppo 2,5M tok/giorno). Premium con meno token free: gpt-4.1, gpt-4o, gpt-5. Claude: fatturato a consumo (nessun free tier)."
         }
       }
     },
@@ -54,7 +54,7 @@
       },
       "general": {
         "title": "Impostazioni generali",
-        "description": "Stima uso token/giorno (config attuale): ~{estimated_daily_tokens}\n{token_status}",
+        "description": "{token_summary}",
         "data": {
           "radius_km": "Raggio di ricerca (km)",
           "fuel_types": "Tipi di carburante",
@@ -70,7 +70,7 @@
         },
         "data_description": {
           "top_n": "Non influisce sui calcoli statistici: media e prezzo minimo usano sempre tutte le stazioni nel raggio configurato.",
-          "ai_model": "Gruppo 2,5M token/giorno free: gpt-4.1-mini, gpt-4o-mini, gpt-5-mini. Gruppo 1M/giorno free (250K tier 1-2): gpt-4.1, gpt-4o, gpt-5. Claude: claude-haiku (economico), claude-sonnet (bilanciato)."
+          "ai_model": "Raccomandato: gpt-4.1-mini (gruppo 2,5M tok/giorno). Premium con meno token free: gpt-4.1, gpt-4o, gpt-5. Claude: fatturato a consumo (nessun free tier)."
         }
       },
       "stations": {

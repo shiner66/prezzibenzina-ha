@@ -65,18 +65,34 @@ def _estimate_daily_tokens(fuel_types: list[str], refresh_min: int) -> int:
     return calls_per_day * len(fuel_types) * AI_TOKENS_PER_CALL_EST
 
 
-def _free_tier_status(model: str, daily_est: int) -> str:
-    """Return a status string for the model's free tier vs estimated usage."""
-    limit = OPENAI_FREE_TIER_DAILY.get(model, 0)
-    if limit == 0:
-        return f"⚠ Stima {daily_est:,} tok/giorno — modello non in free tier (fatturato)"
-    pct = daily_est / limit * 100
-    if pct >= 90:
-        return (
-            f"⚠ Stima {daily_est:,} tok/giorno vs limite {limit:,} free — "
-            "rischio billing (regola all-or-nothing OpenAI)"
-        )
-    return f"✓ Stima {daily_est:,} tok/giorno ({pct:.0f}% del limite free {limit:,}/giorno)"
+def _build_token_summary(fuel_types: list[str], refresh_min: int) -> str:
+    """Build a full model-comparison table for display in description_placeholders.
+
+    Shows estimated daily token usage vs free-tier limits for every model group
+    at the *current* config (fuel_types × refresh interval). The estimate does
+    NOT update in real-time while the form is open; reopen settings after
+    changing refresh interval or fuel types to see updated numbers.
+    """
+    daily_est = _estimate_daily_tokens(fuel_types, refresh_min)
+    calls_per_fuel = max(1, (24 * 60) // max(1, refresh_min))
+    calls_total = calls_per_fuel * len(fuel_types)
+
+    limit_mini = OPENAI_FREE_TIER_DAILY.get("gpt-4.1-mini", 2_500_000)
+    limit_premium = OPENAI_FREE_TIER_DAILY.get("gpt-4.1", 250_000)
+
+    def _row(limit: int) -> str:
+        pct = daily_est / limit * 100
+        icon = "✓" if pct < 90 else "⚠ rischio billing"
+        return f"{daily_est:,} tok/gg ({pct:.1f}% di {limit:,}) {icon}"
+
+    return (
+        f"Stima: ~{daily_est:,} tok/giorno ({calls_total} chiamate AI/giorno con {len(fuel_types)} carburante/i)\n"
+        f"• gpt-4.1-mini / gpt-4.1-nano / gpt-4o-mini / gpt-5-mini → {_row(limit_mini)}\n"
+        f"• gpt-4.1 / gpt-4o / gpt-5 → {_row(limit_premium)}\n"
+        f"• Claude (Haiku/Sonnet) → nessun free tier (fatturato a consumo)\n"
+        f"⚠ Free tier OpenAI attivo solo con Data Sharing abilitato (impostazioni account OpenAI).\n"
+        f"⚠ La stima si aggiorna riaprendo le impostazioni dopo aver cambiato intervallo o carburanti."
+    )
 
 
 class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -205,7 +221,6 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         fuel_types = self._options.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
         refresh_min = self._options.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
-        daily_est = _estimate_daily_tokens(fuel_types, refresh_min)
 
         all_models = OPENAI_MODELS + CLAUDE_MODELS
         schema = vol.Schema(
@@ -251,8 +266,7 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="advanced",
             data_schema=schema,
             description_placeholders={
-                "estimated_daily_tokens": f"{daily_est:,}",
-                "token_status": _free_tier_status(DEFAULT_AI_MODEL_OPENAI, daily_est),
+                "token_summary": _build_token_summary(fuel_types, refresh_min),
             },
         )
 
@@ -370,7 +384,6 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         current_model = opts.get(CONF_AI_MODEL, DEFAULT_AI_MODEL_OPENAI)
         current_fuel_types = opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
         current_refresh = opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN)
-        daily_est = _estimate_daily_tokens(current_fuel_types, current_refresh)
 
         return self.async_show_form(
             step_id="general",
@@ -391,8 +404,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 },
             ),
             description_placeholders={
-                "estimated_daily_tokens": f"{daily_est:,}",
-                "token_status": _free_tier_status(current_model, daily_est),
+                "token_summary": _build_token_summary(current_fuel_types, current_refresh),
             },
         )
 

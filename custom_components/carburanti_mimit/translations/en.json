@@ -22,7 +22,7 @@
       },
       "advanced": {
         "title": "Advanced settings",
-        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.\n\nEstimated token usage/day (current config): ~{estimated_daily_tokens}\n{token_status}\n⚠ OpenAI billing: if a single request exceeds the daily limit, the entire request is billed at standard rates.",
+        "description": "Configure the ranking size, update interval, and optional AI for trend analysis.\n\n{token_summary}",
         "data": {
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
@@ -32,7 +32,7 @@
         },
         "data_description": {
           "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
-          "ai_model": "2.5M free token/day group: gpt-4.1-mini, gpt-4o-mini, gpt-5-mini. 1M/day free group (250K for tiers 1-2): gpt-4.1, gpt-4o, gpt-5. Claude: claude-haiku (cheapest), claude-sonnet (balanced)."
+          "ai_model": "Recommended: gpt-4.1-mini (2.5M free token/day group). Lower free quota: gpt-4.1, gpt-4o, gpt-5. Claude: no free tier (pay-per-token)."
         }
       }
     },
@@ -54,7 +54,7 @@
       },
       "general": {
         "title": "General settings",
-        "description": "Estimated token usage/day (current config): ~{estimated_daily_tokens}\n{token_status}",
+        "description": "{token_summary}",
         "data": {
           "radius_km": "Search radius (km)",
           "fuel_types": "Fuel types",
@@ -70,7 +70,7 @@
         },
         "data_description": {
           "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
-          "ai_model": "2.5M free token/day group: gpt-4.1-mini, gpt-4o-mini, gpt-5-mini. 1M/day free group (250K for tiers 1-2): gpt-4.1, gpt-4o, gpt-5. Claude: claude-haiku (cheapest), claude-sonnet (balanced)."
+          "ai_model": "Recommended: gpt-4.1-mini (2.5M free token/day group). Lower free quota: gpt-4.1, gpt-4o, gpt-5. Claude: no free tier (pay-per-token)."
         }
       },
       "stations": {
