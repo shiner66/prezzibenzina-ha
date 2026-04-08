@@ -649,16 +649,30 @@ class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
         )
         self._attr_translation_key = SENSOR_STATION
         self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
-
-    # Translation placeholders are dynamic: use the real station name once
-    # coordinator data is available, fall back to ID string at startup.
-    @property  # type: ignore[override]
-    def _attr_translation_placeholders(self) -> dict[str, str]:  # type: ignore[override]
-        s = self._get_enriched()
-        return {
-            "fuel_type": self._fuel_type,
-            "station_name": s.station.nome if s else f"#{self._station_id}",
+        # HA metaclass forbids overriding _attr_* as @property, so we use a
+        # plain instance attribute. Resolve the real name eagerly if coordinator
+        # data is already present (e.g. after reload); otherwise fall back to the
+        # station ID and update it on the first _handle_coordinator_update call.
+        area = _area(coordinator, fuel_type)
+        eager_station = (
+            next((s for s in area.all_stations if s.station.id == station_id), None)
+            if area
+            else None
+        )
+        self._attr_translation_placeholders = {
+            "fuel_type": fuel_type,
+            "station_name": eager_station.station.nome if eager_station else f"#{station_id}",
         }
+
+    def _handle_coordinator_update(self) -> None:
+        """Refresh translation placeholder with the real station name."""
+        s = self._get_enriched()
+        if s:
+            self._attr_translation_placeholders = {
+                "fuel_type": self._fuel_type,
+                "station_name": s.station.nome,
+            }
+        super()._handle_coordinator_update()
 
     def _get_enriched(self):
         """Return the EnrichedStation for this station_id and fuel_type, or None."""
