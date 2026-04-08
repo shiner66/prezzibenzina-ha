@@ -223,24 +223,35 @@ class CarburantiMimitConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
-    """Two-step options flow: general settings → favourite station picker."""
+    """Menu-based options flow: general settings | favourite station picker."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._config_entry = config_entry
-        # Intermediate storage: populated in async_step_init, finalised in async_step_stations
-        self._new_options: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
-    # Step 1 — general settings (same fields as before)
+    # Root menu
     # ------------------------------------------------------------------
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["general", "stations"],
+        )
+
+    # ------------------------------------------------------------------
+    # Menu option A — general settings
+    # ------------------------------------------------------------------
+
+    async def async_step_general(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
         opts = self._config_entry.options
 
         if user_input is not None:
-            self._new_options = {
+            new_options = {
+                **opts,  # preserve any keys not in this form (e.g. favorite_station_ids)
                 CONF_RADIUS_KM: int(user_input[CONF_RADIUS_KM]),
                 CONF_FUEL_TYPES: user_input[CONF_FUEL_TYPES],
                 CONF_INCLUDE_SELF: user_input[CONF_INCLUDE_SELF],
@@ -256,7 +267,8 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 CONF_AI_PROVIDER: user_input.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
                 CONF_AI_API_KEY: user_input.get(CONF_AI_API_KEY, ""),
             }
-            return await self.async_step_stations()
+            new_options.setdefault(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
+            return self.async_create_entry(title="", data=new_options)
 
         schema = vol.Schema(
             {
@@ -326,38 +338,40 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="general", data_schema=schema)
 
     # ------------------------------------------------------------------
-    # Step 2 — favourite station picker
+    # Menu option B — favourite station picker
     # ------------------------------------------------------------------
 
     async def async_step_stations(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Let the user pick which stations within the radius to pin as sensors."""
+        opts = self._config_entry.options
+
         if user_input is not None:
-            # Convert selector string values back to int IDs
             raw_ids = user_input.get(CONF_FAVORITE_STATION_IDS, [])
-            self._new_options[CONF_FAVORITE_STATION_IDS] = [int(x) for x in raw_ids]
-            return self.async_create_entry(title="", data=self._new_options)
+            new_options = {
+                **opts,
+                CONF_FAVORITE_STATION_IDS: [int(x) for x in raw_ids],
+            }
+            return self.async_create_entry(title="", data=new_options)
 
         # Build station list from coordinator's last snapshot
         station_options = self._build_station_options()
         current_ids = [
             str(i)
-            for i in self._config_entry.options.get(
-                CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS
-            )
+            for i in opts.get(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
         ]
 
-        # Keep any previously selected station IDs even if they've temporarily
-        # left the radius (coordinator hasn't refreshed yet, or radius was shrunk).
-        extra: list[dict[str, str]] = []
+        # Keep previously selected IDs even if they've temporarily left the radius.
         known_ids = {opt["value"] for opt in station_options}
-        for sid in current_ids:
-            if sid not in known_ids:
-                extra.append({"value": sid, "label": f"Stazione ID {sid} (fuori raggio)"})
+        extra: list[dict[str, str]] = [
+            {"value": sid, "label": f"Stazione ID {sid} (fuori raggio)"}
+            for sid in current_ids
+            if sid not in known_ids
+        ]
         all_options = station_options + extra
 
         schema = vol.Schema(
@@ -382,7 +396,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "station_count": str(len(station_options)),
                 "no_data_hint": (
-                    "⚠️ Nessuna stazione disponibile: esegui un aggiornamento manuale (Forza aggiornamento) e riapri le opzioni."
+                    " ⚠️ Nessuna stazione disponibile: esegui un aggiornamento manuale e riapri le opzioni."
                     if no_data
                     else ""
                 ),

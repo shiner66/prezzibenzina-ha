@@ -44,7 +44,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "Opzioni Carburanti MIMIT",
+        "title": "Carburanti MIMIT",
+        "menu_options": {
+          "general": "Impostazioni generali",
+          "stations": "Stazioni preferite"
+        }
+      },
+      "general": {
+        "title": "Impostazioni generali",
         "data": {
           "radius_km": "Raggio di ricerca (km)",
           "fuel_types": "Tipi di carburante",
@@ -52,6 +59,8 @@
           "include_servito": "Includi servito",
           "top_n": "Stazioni da mostrare in classifica (solo visualizzazione)",
           "update_interval_h": "Intervallo di aggiornamento (ore)",
+          "use_community_prices": "Usa prezzi community",
+          "update_interval_community_min": "Intervallo aggiornamento community (min)",
           "ai_provider": "Provider AI (opzionale)",
           "ai_api_key": "Chiave API AI"
         },

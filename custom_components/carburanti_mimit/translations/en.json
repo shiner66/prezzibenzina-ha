@@ -44,7 +44,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "Carburanti MIMIT options",
+        "title": "Carburanti MIMIT",
+        "menu_options": {
+          "general": "General settings",
+          "stations": "Favourite stations"
+        }
+      },
+      "general": {
+        "title": "General settings",
         "data": {
           "radius_km": "Search radius (km)",
           "fuel_types": "Fuel types",
@@ -52,6 +59,8 @@
           "include_servito": "Include full-service",
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
+          "use_community_prices": "Use community prices",
+          "update_interval_community_min": "Community update interval (min)",
           "ai_provider": "AI provider (optional)",
           "ai_api_key": "AI API key"
         },
