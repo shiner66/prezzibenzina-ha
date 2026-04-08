@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,8 +23,9 @@ def _make_area(
     fuel_type: str = "Benzina",
     cheapest: float = 1.800,
     average: float = 1.850,
-    top_n: int = 3,
+    n: int = 3,
 ) -> FuelAreaData:
+    """Build a FuelAreaData with n stations, with IDs 1…n."""
     stations = [
         make_enriched(
             price=cheapest + i * 0.010,
@@ -32,39 +33,45 @@ def _make_area(
             station=make_station(station_id=i + 1, nome=f"Stazione {i + 1}"),
             distance_km=1.0 + i,
         )
-        for i in range(top_n)
+        for i in range(n)
     ]
     area = FuelAreaData(fuel_type=fuel_type)
     area.cheapest_price = cheapest
     area.cheapest_station = stations[0]
     area.top_stations = stations
+    area.all_stations = stations        # new field: full list for favorite sensors
     area.average_price = average
     area.self_cheapest_price = cheapest
     area.servito_cheapest_price = cheapest + 0.05
-    area.station_count = top_n
+    area.station_count = n
     return area
 
 
-def _make_coordinator_with_data(fuel_type: str = "Benzina", top_n: int = 3) -> MagicMock:
-    coordinator = MagicMock()
-    coordinator.ai_cache = {}
-    area = _make_area(fuel_type=fuel_type, top_n=top_n)
-    coordinator.data = CoordinatorData(
+def _make_coordinator(fuel_type: str = "Benzina", n: int = 3) -> MagicMock:
+    coord = MagicMock()
+    coord.ai_cache = {}
+    area = _make_area(fuel_type=fuel_type, n=n)
+    coord.data = CoordinatorData(
         by_fuel={fuel_type: area},
-        last_updated=datetime(2024, 1, 15, 8, 15, 0, tzinfo=timezone.utc),
-        station_count_in_radius=top_n,
+        last_updated=datetime(2024, 1, 15, 8, 15, tzinfo=timezone.utc),
+        station_count_in_radius=n,
         data_source="mimit_csv",
+        stations_in_radius=[
+            {"id": i + 1, "name": f"Stazione {i + 1}", "bandiera": "ENI",
+             "comune": "Milano", "distance_km": 1.0 + i}
+            for i in range(n)
+        ],
     )
-    return coordinator
+    return coord
 
 
-def _make_config_entry(entry_id: str = "test_entry", options: dict | None = None) -> MagicMock:
+def _make_entry(entry_id: str = "test_entry", options: dict | None = None) -> MagicMock:
     entry = MagicMock()
     entry.entry_id = entry_id
     entry.options = options or {
         "fuel_types": ["Benzina"],
         "top_n": 3,
-        "show_individual_stations": False,
+        "favorite_station_ids": [],
         "radius_km": 10,
         "ai_provider": "none",
         "ai_api_key": "",
@@ -78,62 +85,43 @@ def _make_config_entry(entry_id: str = "test_entry", options: dict | None = None
 
 class TestCheapestPriceSensor:
     def _sensor(self, fuel_type: str = "Benzina") -> CheapestPriceSensor:
-        coordinator = _make_coordinator_with_data(fuel_type)
-        entry = _make_config_entry()
-        return CheapestPriceSensor(coordinator, entry, fuel_type)
+        return CheapestPriceSensor(_make_coordinator(fuel_type), _make_entry(), fuel_type)
 
     def test_native_value_returns_cheapest_price(self):
-        sensor = self._sensor()
-        assert sensor.native_value == pytest.approx(1.800)
+        assert self._sensor().native_value == pytest.approx(1.800)
 
     def test_native_value_none_when_no_data(self):
-        coordinator = MagicMock()
-        coordinator.data = None
-        entry = _make_config_entry()
-        sensor = CheapestPriceSensor(coordinator, entry, "Benzina")
-        assert sensor.native_value is None
+        coord = MagicMock()
+        coord.data = None
+        assert CheapestPriceSensor(coord, _make_entry(), "Benzina").native_value is None
 
-    def test_unit_of_measurement_benzina(self):
-        sensor = self._sensor("Benzina")
-        assert sensor._attr_native_unit_of_measurement == "EUR/L"
+    def test_unit_benzina(self):
+        assert self._sensor("Benzina")._attr_native_unit_of_measurement == "EUR/L"
 
-    def test_unit_of_measurement_metano(self):
-        sensor = self._sensor("Metano")
-        # Metano uses EUR/kg
-        assert sensor._attr_native_unit_of_measurement == "EUR/kg"
+    def test_unit_metano(self):
+        assert self._sensor("Metano")._attr_native_unit_of_measurement == "EUR/kg"
 
-    def test_extra_state_attributes_has_station_name(self):
-        sensor = self._sensor()
-        attrs = sensor.extra_state_attributes
-        assert "station_name" in attrs
-        assert attrs["station_name"] == "Stazione 1"
+    def test_attributes_station_name(self):
+        assert self._sensor().extra_state_attributes["station_name"] == "Stazione 1"
 
-    def test_extra_state_attributes_has_top_stations_list(self):
-        sensor = self._sensor()
-        attrs = sensor.extra_state_attributes
-        assert "top_stations" in attrs
+    def test_attributes_top_stations_list(self):
+        attrs = self._sensor().extra_state_attributes
         assert isinstance(attrs["top_stations"], list)
         assert len(attrs["top_stations"]) == 3
 
-    def test_extra_state_attributes_empty_when_no_station(self):
-        coordinator = MagicMock()
+    def test_attributes_empty_when_no_station(self):
+        coord = MagicMock()
         area = FuelAreaData(fuel_type="Benzina")
-        area.cheapest_price = None
-        area.cheapest_station = None
-        coordinator.data = CoordinatorData(
+        coord.data = CoordinatorData(
             by_fuel={"Benzina": area},
             last_updated=datetime(2024, 1, 15, tzinfo=timezone.utc),
             station_count_in_radius=0,
         )
-        entry = _make_config_entry()
-        sensor = CheapestPriceSensor(coordinator, entry, "Benzina")
-        assert sensor.extra_state_attributes == {}
+        assert CheapestPriceSensor(coord, _make_entry(), "Benzina").extra_state_attributes == {}
 
     def test_unique_id_format(self):
-        sensor = self._sensor()
-        assert "test_entry" in sensor._attr_unique_id
-        assert "Benzina" in sensor._attr_unique_id
-        assert "cheapest" in sensor._attr_unique_id
+        uid = self._sensor()._attr_unique_id
+        assert "test_entry" in uid and "Benzina" in uid and "cheapest" in uid
 
 
 # ---------------------------------------------------------------------------
@@ -141,121 +129,111 @@ class TestCheapestPriceSensor:
 # ---------------------------------------------------------------------------
 
 class TestAveragePriceSensor:
-    def _sensor(self, fuel_type: str = "Benzina") -> AveragePriceSensor:
-        coordinator = _make_coordinator_with_data(fuel_type)
-        entry = _make_config_entry()
-        return AveragePriceSensor(coordinator, entry, fuel_type)
+    def _sensor(self) -> AveragePriceSensor:
+        return AveragePriceSensor(_make_coordinator(), _make_entry(), "Benzina")
 
-    def test_native_value_returns_average(self):
-        sensor = self._sensor()
-        assert sensor.native_value == pytest.approx(1.850)
+    def test_native_value(self):
+        assert self._sensor().native_value == pytest.approx(1.850)
 
-    def test_native_value_none_when_no_data(self):
-        coordinator = MagicMock()
-        coordinator.data = None
-        entry = _make_config_entry()
-        sensor = AveragePriceSensor(coordinator, entry, "Benzina")
-        assert sensor.native_value is None
+    def test_none_when_no_data(self):
+        coord = MagicMock()
+        coord.data = None
+        assert AveragePriceSensor(coord, _make_entry(), "Benzina").native_value is None
 
-    def test_unique_id_format(self):
-        sensor = self._sensor()
-        assert "average" in sensor._attr_unique_id
+    def test_unique_id(self):
+        assert "average" in self._sensor()._attr_unique_id
 
 
 # ---------------------------------------------------------------------------
-# FavoriteStationSensor
+# FavoriteStationSensor — station_id-based
 # ---------------------------------------------------------------------------
 
 class TestFavoriteStationSensor:
-    def _sensor(self, rank: int = 1, fuel_type: str = "Benzina", top_n: int = 3) -> FavoriteStationSensor:
-        coordinator = _make_coordinator_with_data(fuel_type, top_n=top_n)
-        entry = _make_config_entry()
-        return FavoriteStationSensor(coordinator, entry, fuel_type, rank)
+    def _sensor(self, station_id: int = 1, fuel_type: str = "Benzina", n: int = 3) -> FavoriteStationSensor:
+        return FavoriteStationSensor(
+            _make_coordinator(fuel_type, n), _make_entry(), fuel_type, station_id
+        )
 
-    def test_rank_1_returns_cheapest_price(self):
-        sensor = self._sensor(rank=1)
-        assert sensor.native_value == pytest.approx(1.800)
+    # --- native_value ---
 
-    def test_rank_2_returns_second_cheapest(self):
-        sensor = self._sensor(rank=2)
-        assert sensor.native_value == pytest.approx(1.810)
+    def test_station_1_returns_cheapest(self):
+        assert self._sensor(1).native_value == pytest.approx(1.800)
 
-    def test_rank_3_returns_third_cheapest(self):
-        sensor = self._sensor(rank=3)
-        assert sensor.native_value == pytest.approx(1.820)
+    def test_station_2_returns_second_price(self):
+        assert self._sensor(2).native_value == pytest.approx(1.810)
 
-    def test_rank_beyond_available_returns_none(self):
-        sensor = self._sensor(rank=5, top_n=3)
+    def test_station_3_returns_third_price(self):
+        assert self._sensor(3).native_value == pytest.approx(1.820)
+
+    def test_unknown_station_id_returns_none(self):
+        # ID 99 doesn't exist in the 3-station area
+        assert self._sensor(99, n=3).native_value is None
+
+    def test_none_when_no_coordinator_data(self):
+        coord = MagicMock()
+        coord.data = None
+        sensor = FavoriteStationSensor(coord, _make_entry(), "Benzina", 1)
         assert sensor.native_value is None
 
-    def test_available_false_when_rank_exceeds_stations(self):
-        sensor = self._sensor(rank=5, top_n=3)
-        assert sensor.available is False
+    # --- available ---
 
-    def test_available_true_for_valid_rank(self):
-        sensor = self._sensor(rank=1, top_n=3)
-        assert sensor.available is True
+    def test_available_when_station_found(self):
+        assert self._sensor(1).available is True
 
-    def test_extra_state_attributes_has_rank(self):
-        sensor = self._sensor(rank=2)
-        attrs = sensor.extra_state_attributes
-        assert attrs["rank"] == 2
+    def test_unavailable_for_missing_station(self):
+        assert self._sensor(99, n=3).available is False
 
-    def test_extra_state_attributes_has_station_name(self):
-        sensor = self._sensor(rank=1)
-        attrs = sensor.extra_state_attributes
-        assert attrs["station_name"] == "Stazione 1"
+    # --- extra_state_attributes ---
 
-    def test_extra_state_attributes_rank_2_has_correct_station(self):
-        sensor = self._sensor(rank=2)
-        attrs = sensor.extra_state_attributes
+    def test_attributes_has_station_id(self):
+        assert self._sensor(2).extra_state_attributes["station_id"] == 2
+
+    def test_attributes_has_correct_station_name(self):
+        attrs = self._sensor(2).extra_state_attributes
         assert attrs["station_name"] == "Stazione 2"
 
-    def test_extra_state_attributes_empty_when_rank_exceeds(self):
-        sensor = self._sensor(rank=5, top_n=3)
-        assert sensor.extra_state_attributes == {}
+    def test_attributes_empty_for_unknown_station(self):
+        assert self._sensor(99, n=3).extra_state_attributes == {}
 
-    def test_extra_state_attributes_has_distance(self):
-        sensor = self._sensor(rank=1)
-        attrs = sensor.extra_state_attributes
-        assert "distance_km" in attrs
+    def test_attributes_has_distance(self):
+        attrs = self._sensor(1).extra_state_attributes
         assert attrs["distance_km"] == pytest.approx(1.0)
 
-    def test_extra_state_attributes_has_data_source(self):
-        sensor = self._sensor(rank=1)
-        attrs = sensor.extra_state_attributes
-        assert "data_source" in attrs
-        assert attrs["data_source"] == "mimit_csv"
+    def test_attributes_has_data_source(self):
+        assert self._sensor(1).extra_state_attributes["data_source"] == "mimit_csv"
 
-    def test_unique_id_includes_rank(self):
-        sensor = self._sensor(rank=3)
-        assert "3" in sensor._attr_unique_id
-        assert "station" in sensor._attr_unique_id
+    # --- unique_id ---
 
-    def test_unique_ids_differ_per_rank(self):
-        coordinator = _make_coordinator_with_data(top_n=3)
-        entry = _make_config_entry()
-        s1 = FavoriteStationSensor(coordinator, entry, "Benzina", 1)
-        s2 = FavoriteStationSensor(coordinator, entry, "Benzina", 2)
+    def test_unique_id_contains_station_id(self):
+        uid = self._sensor(42)._attr_unique_id
+        assert "42" in uid and "station" in uid
+
+    def test_unique_ids_differ_per_station(self):
+        coord = _make_coordinator(n=3)
+        entry = _make_entry()
+        s1 = FavoriteStationSensor(coord, entry, "Benzina", 1)
+        s2 = FavoriteStationSensor(coord, entry, "Benzina", 2)
         assert s1._attr_unique_id != s2._attr_unique_id
 
-    def test_unique_ids_differ_per_fuel_type(self):
-        coordinator = MagicMock()
-        coordinator.data = None
-        entry = _make_config_entry()
-        s_benzina = FavoriteStationSensor(coordinator, entry, "Benzina", 1)
-        s_gasolio = FavoriteStationSensor(coordinator, entry, "Gasolio", 1)
-        assert s_benzina._attr_unique_id != s_gasolio._attr_unique_id
+    def test_unique_ids_differ_per_fuel(self):
+        coord = MagicMock()
+        coord.data = None
+        entry = _make_entry()
+        sb = FavoriteStationSensor(coord, entry, "Benzina", 1)
+        sg = FavoriteStationSensor(coord, entry, "Gasolio", 1)
+        assert sb._attr_unique_id != sg._attr_unique_id
 
-    def test_translation_placeholders_contain_rank_and_fuel(self):
-        sensor = self._sensor(rank=2, fuel_type="Gasolio")
-        placeholders = sensor._attr_translation_placeholders
-        assert placeholders["rank"] == "2"
-        assert placeholders["fuel_type"] == "Gasolio"
+    # --- translation placeholders (dynamic: uses real station name) ---
 
-    def test_native_value_none_when_no_coordinator_data(self):
-        coordinator = MagicMock()
-        coordinator.data = None
-        entry = _make_config_entry()
-        sensor = FavoriteStationSensor(coordinator, entry, "Benzina", 1)
-        assert sensor.native_value is None
+    def test_placeholders_with_known_station(self):
+        placeholders = self._sensor(1)._attr_translation_placeholders
+        assert placeholders["fuel_type"] == "Benzina"
+        assert placeholders["station_name"] == "Stazione 1"
+
+    def test_placeholders_fallback_when_no_data(self):
+        coord = MagicMock()
+        coord.data = None
+        sensor = FavoriteStationSensor(coord, _make_entry(), "Benzina", 7)
+        ph = sensor._attr_translation_placeholders
+        assert ph["fuel_type"] == "Benzina"
+        assert "7" in ph["station_name"]   # fallback shows ID

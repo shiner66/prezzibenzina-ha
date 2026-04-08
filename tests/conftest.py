@@ -280,7 +280,7 @@ def mock_config_entry():
     entry.options = {
         "fuel_types": ["Benzina", "Gasolio"],
         "top_n": 3,
-        "show_individual_stations": False,
+        "favorite_station_ids": [],
         "radius_km": 10,
         "ai_provider": "none",
         "ai_api_key": "",

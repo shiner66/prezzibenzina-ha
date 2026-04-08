@@ -17,12 +17,10 @@ from .const import (
     AI_PROVIDER_NONE,
     CONF_AI_API_KEY,
     CONF_AI_PROVIDER,
+    CONF_FAVORITE_STATION_IDS,
     CONF_FUEL_TYPES,
-    CONF_SHOW_INDIVIDUAL_STATIONS,
-    CONF_TOP_N,
+    DEFAULT_FAVORITE_STATION_IDS,
     DEFAULT_FUEL_TYPES,
-    DEFAULT_SHOW_INDIVIDUAL_STATIONS,
-    DEFAULT_TOP_N,
     FUEL_UNITS,
     SENSOR_AI_INSIGHT,
     SENSOR_AVERAGE,
@@ -61,11 +59,10 @@ async def async_setup_entry(
         entities.append(PricePrediction3dSensor(coordinator, entry, fuel_type))
         entities.append(insight)
 
-    if entry.options.get(CONF_SHOW_INDIVIDUAL_STATIONS, DEFAULT_SHOW_INDIVIDUAL_STATIONS):
-        top_n = entry.options.get(CONF_TOP_N, DEFAULT_TOP_N)
+    fav_ids: list[int] = entry.options.get(CONF_FAVORITE_STATION_IDS, DEFAULT_FAVORITE_STATION_IDS)
+    for station_id in fav_ids:
         for fuel_type in fuel_types:
-            for rank in range(1, int(top_n) + 1):
-                entities.append(FavoriteStationSensor(coordinator, entry, fuel_type, rank))
+            entities.append(FavoriteStationSensor(coordinator, entry, fuel_type, station_id))
 
     async_add_entities(entities)
 
@@ -625,13 +622,13 @@ class PriceAIInsightSensor(CarburantiMimitEntity, RestoreEntity, SensorEntity):
 # ---------------------------------------------------------------------------
 
 class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
-    """Individual sensor for a top-ranked station per fuel type.
+    """Sensor pinned to a specific station chosen by the user.
 
-    Created when CONF_SHOW_INDIVIDUAL_STATIONS is enabled. One sensor is
-    created per rank (1 … top_n) per fuel type, giving direct access to each
-    station's price and details without unpacking the top_stations attribute.
+    Created for each station_id in CONF_FAVORITE_STATION_IDS × each fuel type.
+    The station is looked up by ID in FuelAreaData.all_stations so it stays
+    current across price updates and is not limited to the top-N ranking.
 
-    State  → current price at that ranked station (float, EUR/L or EUR/kg)
+    State  → current price at that station (float, EUR/L or EUR/kg)
     Attributes → full station details: name, address, distance, bandiera, etc.
     """
 
@@ -643,38 +640,53 @@ class FavoriteStationSensor(CarburantiMimitEntity, SensorEntity):
         coordinator: CarburantiMimitCoordinator,
         config_entry: ConfigEntry,
         fuel_type: str,
-        rank: int,
+        station_id: int,
     ) -> None:
         super().__init__(coordinator, config_entry, fuel_type)
-        self._rank = rank  # 1-based ranking position
+        self._station_id = station_id
         self._attr_unique_id = (
-            f"{config_entry.entry_id}_{fuel_type}_{SENSOR_STATION}_{rank}"
+            f"{config_entry.entry_id}_{fuel_type}_{SENSOR_STATION}_{station_id}"
         )
         self._attr_translation_key = SENSOR_STATION
-        self._attr_translation_placeholders = {"fuel_type": fuel_type, "rank": str(rank)}
         self._attr_native_unit_of_measurement = FUEL_UNITS.get(fuel_type, "EUR/L")
+
+    # Translation placeholders are dynamic: use the real station name once
+    # coordinator data is available, fall back to ID string at startup.
+    @property  # type: ignore[override]
+    def _attr_translation_placeholders(self) -> dict[str, str]:  # type: ignore[override]
+        s = self._get_enriched()
+        return {
+            "fuel_type": self._fuel_type,
+            "station_name": s.station.nome if s else f"#{self._station_id}",
+        }
+
+    def _get_enriched(self):
+        """Return the EnrichedStation for this station_id and fuel_type, or None."""
+        area = _area(self.coordinator, self._fuel_type)
+        if not area:
+            return None
+        return next(
+            (s for s in area.all_stations if s.station.id == self._station_id),
+            None,
+        )
 
     @property
     def available(self) -> bool:
-        """Available only when the ranked station exists in coordinator data."""
-        area = _area(self.coordinator, self._fuel_type)
-        return area is not None and len(area.top_stations) >= self._rank
+        """Available only when the coordinator has a price for this station."""
+        return self._get_enriched() is not None
 
     @property
     def native_value(self) -> float | None:
-        area = _area(self.coordinator, self._fuel_type)
-        if not area or len(area.top_stations) < self._rank:
-            return None
-        return area.top_stations[self._rank - 1].price
+        s = self._get_enriched()
+        return s.price if s else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        area = _area(self.coordinator, self._fuel_type)
-        if not area or len(area.top_stations) < self._rank:
+        s = self._get_enriched()
+        if not s:
             return {}
-        s = area.top_stations[self._rank - 1]
         return {
-            "rank": self._rank,
+            "station_id": self._station_id,
             "station_name": s.station.nome,
             "address": s.station.indirizzo,
             "comune": s.station.comune,

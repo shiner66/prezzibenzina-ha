@@ -27,12 +27,10 @@
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
           "ai_provider": "AI provider (optional)",
-          "ai_api_key": "AI API key",
-          "show_individual_stations": "Create individual sensors for ranked stations"
+          "ai_api_key": "AI API key"
         },
         "data_description": {
-          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
-          "show_individual_stations": "When enabled, creates a dedicated sensor for each station in the ranking (1 sensor per station × fuel type)."
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
         }
       }
     },
@@ -55,12 +53,20 @@
           "top_n": "Number of stations in ranking",
           "update_interval_h": "Update interval (hours)",
           "ai_provider": "AI provider (optional)",
-          "ai_api_key": "AI API key",
-          "show_individual_stations": "Create individual sensors for ranked stations"
+          "ai_api_key": "AI API key"
         },
         "data_description": {
-          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius.",
-          "show_individual_stations": "When enabled, creates a dedicated sensor for each station in the ranking (1 sensor per station × fuel type)."
+          "top_n": "Does not affect statistics: average and cheapest price always use all stations within the configured radius."
+        }
+      },
+      "stations": {
+        "title": "Favourite stations",
+        "description": "Select the stations to monitor as individual sensors. Found {station_count} stations within the configured radius.{no_data_hint}",
+        "data": {
+          "favorite_station_ids": "Favourite stations"
+        },
+        "data_description": {
+          "favorite_station_ids": "Each selected station will create a dedicated sensor for every configured fuel type."
         }
       }
     }
@@ -91,7 +97,7 @@
         "name": "{fuel_type} – AI Insight"
       },
       "station": {
-        "name": "{fuel_type} – Station #{rank}"
+        "name": "{fuel_type} – {station_name}"
       }
     }
   },

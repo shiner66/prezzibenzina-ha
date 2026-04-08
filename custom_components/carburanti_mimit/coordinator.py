@@ -70,6 +70,7 @@ class FuelAreaData:
     cheapest_price: float | None = None
     cheapest_station: EnrichedStation | None = None
     top_stations: list[EnrichedStation] = field(default_factory=list)
+    all_stations: list[EnrichedStation] = field(default_factory=list)
     average_price: float | None = None
     self_cheapest_price: float | None = None
     servito_cheapest_price: float | None = None
@@ -86,6 +87,7 @@ class CoordinatorData:
     station_count_in_radius: int
     data_source: str = "mimit_csv"  # "mimit_csv" | "mimit_intraday" | "community_overlay"
     national_averages: dict[str, float] = field(default_factory=dict)
+    stations_in_radius: list[dict] = field(default_factory=list)
 
 
 class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
@@ -717,6 +719,7 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 cheapest_price=round(cheapest.price, 4),
                 cheapest_station=cheapest,
                 top_stations=top_stations,
+                all_stations=filtered,        # full sorted list for favorite sensors
                 average_price=round(avg, 4),
                 self_cheapest_price=round(self_only[0].price, 4) if self_only else None,
                 servito_cheapest_price=(
@@ -727,8 +730,25 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         total = sum(area.station_count for area in by_fuel.values())
 
+        # Build deduplicated station list (sorted by distance) for the Options
+        # Flow picker — one entry per physical station regardless of fuel type.
+        seen_ids: set[int] = set()
+        stations_snap: list[dict] = []
+        for s in sorted(enriched, key=lambda x: x.distance_km):
+            if s.station.id not in seen_ids:
+                seen_ids.add(s.station.id)
+                stations_snap.append({
+                    "id": s.station.id,
+                    "name": s.station.nome,
+                    "address": s.station.indirizzo,
+                    "comune": s.station.comune,
+                    "bandiera": s.station.bandiera,
+                    "distance_km": round(s.distance_km, 2),
+                })
+
         return CoordinatorData(
             by_fuel=by_fuel,
             last_updated=datetime.now(timezone.utc),
             station_count_in_radius=total,
+            stations_in_radius=stations_snap,
         )
