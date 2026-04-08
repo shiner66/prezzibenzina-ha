@@ -277,55 +277,28 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_RADIUS_KM,
-                    default=opts.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM),
-                ): selector.NumberSelector(
+                vol.Required(CONF_RADIUS_KM): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=100, step=1, mode="slider", unit_of_measurement="km")
                 ),
-                vol.Required(
-                    CONF_FUEL_TYPES,
-                    default=opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES),
-                ): selector.SelectSelector(
+                vol.Required(CONF_FUEL_TYPES): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[{"value": ft, "label": ft} for ft in ALL_FUEL_TYPES],
                         multiple=True,
                     )
                 ),
-                vol.Required(
-                    CONF_INCLUDE_SELF,
-                    default=opts.get(CONF_INCLUDE_SELF, DEFAULT_INCLUDE_SELF),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_INCLUDE_SERVITO,
-                    default=opts.get(CONF_INCLUDE_SERVITO, DEFAULT_INCLUDE_SERVITO),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_TOP_N,
-                    default=opts.get(CONF_TOP_N, DEFAULT_TOP_N),
-                ): selector.NumberSelector(
+                vol.Required(CONF_INCLUDE_SELF): selector.BooleanSelector(),
+                vol.Required(CONF_INCLUDE_SERVITO): selector.BooleanSelector(),
+                vol.Required(CONF_TOP_N): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=20, step=1, mode="slider")
                 ),
-                vol.Required(
-                    CONF_UPDATE_INTERVAL_H,
-                    default=opts.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H),
-                ): selector.NumberSelector(
+                vol.Required(CONF_UPDATE_INTERVAL_H): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=24, step=1, mode="slider", unit_of_measurement="h")
                 ),
-                vol.Required(
-                    CONF_USE_COMMUNITY_PRICES,
-                    default=opts.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
-                    default=opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN),
-                ): selector.NumberSelector(
+                vol.Required(CONF_USE_COMMUNITY_PRICES): selector.BooleanSelector(),
+                vol.Required(CONF_UPDATE_INTERVAL_COMMUNITY_MIN): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=5, max=60, step=5, mode="slider", unit_of_measurement="min")
                 ),
-                vol.Optional(
-                    CONF_AI_PROVIDER,
-                    default=opts.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
-                ): selector.SelectSelector(
+                vol.Optional(CONF_AI_PROVIDER): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[
                             {"value": p, "label": _AI_PROVIDER_LABELS.get(p, p)}
@@ -334,16 +307,30 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                         multiple=False,
                     )
                 ),
-                vol.Optional(
-                    CONF_AI_API_KEY,
-                    default=opts.get(CONF_AI_API_KEY, ""),
-                ): selector.TextSelector(
+                vol.Optional(CONF_AI_API_KEY): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
                 ),
             }
         )
 
-        return self.async_show_form(step_id="general", data_schema=schema)
+        return self.async_show_form(
+            step_id="general",
+            data_schema=self.add_suggested_values_to_schema(
+                schema,
+                {
+                    CONF_RADIUS_KM: opts.get(CONF_RADIUS_KM, DEFAULT_RADIUS_KM),
+                    CONF_FUEL_TYPES: opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES),
+                    CONF_INCLUDE_SELF: opts.get(CONF_INCLUDE_SELF, DEFAULT_INCLUDE_SELF),
+                    CONF_INCLUDE_SERVITO: opts.get(CONF_INCLUDE_SERVITO, DEFAULT_INCLUDE_SERVITO),
+                    CONF_TOP_N: opts.get(CONF_TOP_N, DEFAULT_TOP_N),
+                    CONF_UPDATE_INTERVAL_H: opts.get(CONF_UPDATE_INTERVAL_H, DEFAULT_UPDATE_INTERVAL_H),
+                    CONF_USE_COMMUNITY_PRICES: opts.get(CONF_USE_COMMUNITY_PRICES, DEFAULT_USE_COMMUNITY_PRICES),
+                    CONF_UPDATE_INTERVAL_COMMUNITY_MIN: opts.get(CONF_UPDATE_INTERVAL_COMMUNITY_MIN, DEFAULT_UPDATE_INTERVAL_COMMUNITY_MIN),
+                    CONF_AI_PROVIDER: opts.get(CONF_AI_PROVIDER, AI_PROVIDER_NONE),
+                    CONF_AI_API_KEY: opts.get(CONF_AI_API_KEY, ""),
+                },
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Menu option B — step 1: choose fuel types globally
@@ -352,11 +339,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
     async def async_step_stations(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Step 1 of 2: choose which fuel types to show in the station picker.
-
-        The selection is stored as the global CONF_FUEL_TYPES so ranking sensors
-        and the station picker share the same setting.
-        """
+        """Step 1 of 2: choose which fuel types to show in the station picker."""
         opts = self._config_entry.options
 
         if user_input is not None:
@@ -366,10 +349,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         current_fuel_types: list[str] = opts.get(CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES)
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_FUEL_TYPES,
-                    default=current_fuel_types,
-                ): selector.SelectSelector(
+                vol.Required(CONF_FUEL_TYPES): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[{"value": ft, "label": ft} for ft in ALL_FUEL_TYPES],
                         multiple=True,
@@ -378,7 +358,12 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="stations", data_schema=schema)
+        return self.async_show_form(
+            step_id="stations",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, {CONF_FUEL_TYPES: current_fuel_types}
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Menu option B — step 2: pick station × fuel-type combinations
@@ -413,10 +398,7 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
 
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_FAVORITE_STATIONS,
-                    default=current,
-                ): selector.SelectSelector(
+                vol.Optional(CONF_FAVORITE_STATIONS): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=all_options,
                         multiple=True,
@@ -429,7 +411,12 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         no_data = station_count == 0
         return self.async_show_form(
             step_id="stations_picker",
-            data_schema=schema,
+            # add_suggested_values_to_schema is the HA-recommended way to
+            # pre-populate SelectSelector checkboxes (vol.Optional default= is
+            # used only for validation, not for frontend pre-selection).
+            data_schema=self.add_suggested_values_to_schema(
+                schema, {CONF_FAVORITE_STATIONS: current}
+            ),
             description_placeholders={
                 "station_count": str(station_count),
                 "no_data_hint": (
