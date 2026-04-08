@@ -250,8 +250,11 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         opts = self._config_entry.options
 
         if user_input is not None:
+            # Re-read options at save time so we don't overwrite favourite_stations
+            # that may have been saved in a previous step of the same HA session.
+            current_opts = self._config_entry.options
             new_options = {
-                **opts,  # preserve any keys not in this form (e.g. favorite_station_ids)
+                **current_opts,  # preserve favourite_stations and any future keys
                 CONF_RADIUS_KM: int(user_input[CONF_RADIUS_KM]),
                 CONF_FUEL_TYPES: user_input[CONF_FUEL_TYPES],
                 CONF_INCLUDE_SELF: user_input[CONF_INCLUDE_SELF],
@@ -356,7 +359,9 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             selected: list[str] = user_input.get(CONF_FAVORITE_STATIONS, [])
-            new_options = {**opts, CONF_FAVORITE_STATIONS: selected}
+            # Re-read at save time to avoid clobbering general settings saved
+            # in the same HA options session.
+            new_options = {**self._config_entry.options, CONF_FAVORITE_STATIONS: selected}
             return self.async_create_entry(title="", data=new_options)
 
         # Build the flat list of "station_id:fuel_type" options
@@ -410,23 +415,23 @@ class CarburantiMimitOptionsFlow(config_entries.OptionsFlow):
         try:
             coordinator = self._config_entry.runtime_data.coordinator
             stations = coordinator.data.stations_in_radius if coordinator.data else []
-            fuel_types: list[str] = self._config_entry.options.get(
-                CONF_FUEL_TYPES, DEFAULT_FUEL_TYPES
-            )
         except AttributeError:
             return [], 0
 
+        # Show ALL fuel types in the picker so users can pin e.g. HVO stations
+        # without enabling that type globally for ranking sensors.
         options: list[dict[str, str]] = []
         for s in stations:
             name_tc = s["name"].title()
             brand = s["bandiera"].title()
-            # Only show brand prefix when the name doesn't already start with it
-            if brand and not name_tc.lower().startswith(brand.lower()):
+            brand_slug = brand.lower().replace(" ", "")
+            nome_slug = name_tc.lower().replace(" ", "")
+            if brand and not nome_slug.startswith(brand_slug) and nome_slug not in brand_slug:
                 display = f"{brand} – {name_tc}"
             else:
                 display = name_tc or brand
             location = f"{s['comune']} ({s['distance_km']:.1f} km)"
-            for ft in fuel_types:
+            for ft in ALL_FUEL_TYPES:
                 options.append({
                     "value": f"{s['id']}:{ft}",
                     "label": f"{display} | {location} — {ft}",

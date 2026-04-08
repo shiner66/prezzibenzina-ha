@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import MimitApiClient
 from .const import (
+    CONF_FAVORITE_STATIONS,
     CONF_FUEL_TYPES,
     CONF_INCLUDE_SELF,
     CONF_INCLUDE_SERVITO,
@@ -29,6 +30,7 @@ from .const import (
     CONF_UPDATE_INTERVAL_COMMUNITY_MIN,
     CONF_UPDATE_INTERVAL_H,
     CONF_USE_COMMUNITY_PRICES,
+    DEFAULT_FAVORITE_STATIONS,
     DEFAULT_FUEL_TYPES,
     DEFAULT_INCLUDE_SELF,
     DEFAULT_INCLUDE_SERVITO,
@@ -668,9 +670,20 @@ class CarburantiMimitCoordinator(DataUpdateCoordinator[CoordinatorData]):
             CONF_INCLUDE_SERVITO, DEFAULT_INCLUDE_SERVITO
         )
 
+        # Also fetch data for fuel types used in favourite stations but not in the
+        # global config (e.g. user pinned an HVO station without enabling HVO globally).
+        fav_entries: list[str] = self._config_entry.options.get(
+            CONF_FAVORITE_STATIONS, DEFAULT_FAVORITE_STATIONS
+        )
+        fav_fuel_types = {
+            pair.split(":", 1)[1] for pair in fav_entries if ":" in pair
+        }
+        extra_fuel_types = [ft for ft in sorted(fav_fuel_types) if ft not in fuel_types]
+        all_fuel_types = list(fuel_types) + extra_fuel_types
+
         by_fuel: dict[str, FuelAreaData] = {}
 
-        for fuel_type in fuel_types:
+        for fuel_type in all_fuel_types:
             stations = [s for s in enriched if s.fuel_type == fuel_type]
 
             # Apply self/servito filter
