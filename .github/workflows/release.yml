@@ -12,6 +12,7 @@ on:
       - main
       - "claude/**"
       - "codex/**"
+      - "copilot/**"
       - "feature/**"
       - "fix/**"
       - "release/**"
