@@ -45,8 +45,19 @@ _GNEWS_URL = (
     "&hl=it&gl=IT&ceid=IT%3Ait"
 )
 
+# Google News RSS — Italian fiscal/tax policy for fuels (accise, taglio, sconto)
+# This query ensures government discount-related headlines surface even when
+# oil market news dominates the main feed.
+_GNEWS_FISCAL_URL = (
+    "https://news.google.com/rss/search"
+    "?q=%22accise+carburanti%22+OR+%22taglio+accise%22+OR+%22sconto+benzina+decreto%22"
+    "&hl=it&gl=IT&ceid=IT%3Ait"
+)
+
+# Headlines budget: split between oil-market feed and fiscal feed
+_NEWS_MAX = 10          # total headlines to keep
+_NEWS_MAX_FISCAL = 4    # up to N of the total from the fiscal feed
 _FETCH_TIMEOUT_S = 10   # per individual HTTP request
-_NEWS_MAX = 10          # number of headlines to keep
 _SOURCE_RE = re.compile(r"\s*-\s*[^-]+$")   # strips " - Fonte" from titles
 
 
@@ -94,18 +105,19 @@ async def async_fetch_market_context(
     """
     timeout = _aiohttp_timeout(_FETCH_TIMEOUT_S)
 
-    brent_task   = asyncio.create_task(_fetch_yahoo(session, _SYMBOL_BRENT, timeout))
-    ttf_task     = asyncio.create_task(_fetch_yahoo(session, _SYMBOL_TTF, timeout))
-    ets_task     = asyncio.create_task(_fetch_yahoo(session, _SYMBOL_ETS, timeout))
-    eurusd_task  = asyncio.create_task(_fetch_eurusd(session, timeout))
-    news_task    = asyncio.create_task(_fetch_news(session, timeout))
+    brent_task      = asyncio.create_task(_fetch_yahoo(session, _SYMBOL_BRENT, timeout))
+    ttf_task        = asyncio.create_task(_fetch_yahoo(session, _SYMBOL_TTF, timeout))
+    ets_task        = asyncio.create_task(_fetch_yahoo(session, _SYMBOL_ETS, timeout))
+    eurusd_task     = asyncio.create_task(_fetch_eurusd(session, timeout))
+    news_task       = asyncio.create_task(_fetch_news(session, _GNEWS_URL, _NEWS_MAX - _NEWS_MAX_FISCAL, timeout))
+    fiscal_news_task = asyncio.create_task(_fetch_news(session, _GNEWS_FISCAL_URL, _NEWS_MAX_FISCAL, timeout))
 
     results = await asyncio.gather(
-        brent_task, ttf_task, ets_task, eurusd_task, news_task,
+        brent_task, ttf_task, ets_task, eurusd_task, news_task, fiscal_news_task,
         return_exceptions=True,
     )
 
-    brent_data, ttf_data, ets_data, eurusd, news = results
+    brent_data, ttf_data, ets_data, eurusd, news, fiscal_news = results
 
     # Unwrap exceptions → None / []
     if isinstance(brent_data, Exception):
@@ -123,6 +135,9 @@ async def async_fetch_market_context(
     if isinstance(news, Exception):
         _LOGGER.debug("News fetch failed: %s", news)
         news = []
+    if isinstance(fiscal_news, Exception):
+        _LOGGER.debug("Fiscal news fetch failed: %s", fiscal_news)
+        fiscal_news = []
 
     # Require at least Brent price to be useful
     if brent_data is None and eurusd is None:
@@ -141,6 +156,9 @@ async def async_fetch_market_context(
     if brent_curr is not None and eurusd is not None and eurusd > 0:
         brent_eur = round(brent_curr / eurusd, 2)
 
+    # Merge fiscal headlines first so they appear prominently in the prompt
+    combined_news = list(fiscal_news or []) + list(news or [])
+
     ctx = MarketContext(
         brent_usd=brent_curr,
         brent_prev_usd=brent_prev,
@@ -151,12 +169,12 @@ async def async_fetch_market_context(
         ets_eur=ets_curr,
         eurusd=eurusd,
         brent_eur=brent_eur,
-        news_headlines=news or [],
+        news_headlines=combined_news,
         fetched_at=datetime.now(timezone.utc),
     )
     _LOGGER.debug(
-        "Market context: Brent=%.2f USD/bbl TTF=%.2f EUR/MWh EUR/USD=%.4f news=%d",
-        brent_curr or 0, ttf_curr or 0, eurusd or 0, len(news or []),
+        "Market context: Brent=%.2f USD/bbl TTF=%.2f EUR/MWh EUR/USD=%.4f news=%d (fiscal=%d)",
+        brent_curr or 0, ttf_curr or 0, eurusd or 0, len(combined_news), len(fiscal_news or []),
     )
     return ctx
 
@@ -207,10 +225,12 @@ async def _fetch_eurusd(
 
 async def _fetch_news(
     session: aiohttp.ClientSession,
+    url: str,
+    max_headlines: int,
     timeout,
 ) -> list[str]:
-    """Fetch top N Italian oil market headlines from Google News RSS."""
-    async with session.get(_GNEWS_URL, timeout=timeout) as resp:
+    """Fetch top *max_headlines* Italian headlines from a Google News RSS *url*."""
+    async with session.get(url, timeout=timeout) as resp:
         resp.raise_for_status()
         text = await resp.text()
 
@@ -224,7 +244,7 @@ async def _fetch_news(
         clean = _SOURCE_RE.sub("", title_el.text).strip()
         if clean:
             titles.append(clean)
-        if len(titles) >= _NEWS_MAX:
+        if len(titles) >= max_headlines:
             break
     return titles
 

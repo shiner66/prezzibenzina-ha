@@ -7,7 +7,10 @@ import pytest
 
 from custom_components.carburanti_mimit.prediction import (
     PredictionResult,
+    _AccisePolicy,
+    _ACCISE_POLICY,
     _ewols_regression,
+    _fiscal_context,
     _holt_exponential_smoothing,
     compute_prediction,
 )
@@ -348,3 +351,86 @@ class TestGapInterpolation:
         # Should not raise
         result = compute_prediction(history, "Benzina")
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# _fiscal_context — excise policy awareness
+# ---------------------------------------------------------------------------
+
+class TestFiscalContext:
+    def test_no_discount_shows_base_rate(self):
+        """With no active reduction the output contains the base rate and no warning."""
+        result = _fiscal_context("Benzina")
+        assert "0.7284" in result
+        assert "nessun sconto governativo attivo" in result
+        assert "⚠️" not in result
+
+    def test_active_discount_shows_effective_rate(self):
+        """An active discount should expose both base and effective rates."""
+        from unittest.mock import patch
+        policy = _AccisePolicy(0.7284, 0.25, None, "DL test")
+        with patch.dict("custom_components.carburanti_mimit.prediction._ACCISE_POLICY",
+                        {"Benzina": policy}):
+            result = _fiscal_context("Benzina")
+        assert "0.7284" in result
+        assert "0.25" in result or "0.2500" in result
+        assert str(round(0.7284 - 0.25, 4)) in result  # effective rate
+
+    def test_expiry_far_away_no_warning(self):
+        """Expiry more than 14 days away → standard mention, no urgency warning."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        far_expiry = (date.today() + timedelta(days=30)).isoformat()
+        policy = _AccisePolicy(0.7284, 0.25, far_expiry, "DL test")
+        with patch.dict("custom_components.carburanti_mimit.prediction._ACCISE_POLICY",
+                        {"Benzina": policy}):
+            result = _fiscal_context("Benzina")
+        assert "⚠️" not in result
+        assert far_expiry in result
+
+    def test_expiry_within_14_days_medium_warning(self):
+        """Expiry 4–14 days away → medium-urgency warning with day count."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        near_expiry = (date.today() + timedelta(days=10)).isoformat()
+        policy = _AccisePolicy(0.7284, 0.25, near_expiry, "DL test")
+        with patch.dict("custom_components.carburanti_mimit.prediction._ACCISE_POLICY",
+                        {"Benzina": policy}):
+            result = _fiscal_context("Benzina")
+        assert "⚠️" in result
+        assert "10 GIORNI" in result or "10 giorn" in result.lower()
+
+    def test_expiry_within_3_days_imminent_warning(self):
+        """Expiry ≤ 3 days → imminent warning with price impact."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        policy = _AccisePolicy(0.7284, 0.25, tomorrow, "DL test")
+        with patch.dict("custom_components.carburanti_mimit.prediction._ACCISE_POLICY",
+                        {"Benzina": policy}):
+            result = _fiscal_context("Benzina")
+        assert "SCADENZA IMMINENTE" in result
+        assert "0.25" in result or "0.2500" in result  # price impact shown
+
+    def test_already_expired_shows_expired_notice(self):
+        """Past expiry date → shows expired notice, not urgency countdown."""
+        from datetime import timedelta
+        from unittest.mock import patch
+        past = (date.today() - timedelta(days=3)).isoformat()
+        policy = _AccisePolicy(0.7284, 0.25, past, "DL test")
+        with patch.dict("custom_components.carburanti_mimit.prediction._ACCISE_POLICY",
+                        {"Benzina": policy}):
+            result = _fiscal_context("Benzina")
+        assert "SCADUTO" in result
+
+    def test_unknown_fuel_returns_zero_base(self):
+        """Unknown fuel type falls back to zero accisa with no crash."""
+        result = _fiscal_context("FuelTypeXYZ")
+        assert "0.0000" in result
+
+    def test_all_known_fuel_types_have_policy(self):
+        """All keys in _ACCISE_POLICY produce valid output from _fiscal_context."""
+        for fuel_type in _ACCISE_POLICY:
+            result = _fiscal_context(fuel_type)
+            assert isinstance(result, str)
+            assert len(result) > 0

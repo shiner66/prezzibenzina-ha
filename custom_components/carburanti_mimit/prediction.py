@@ -53,7 +53,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from statistics import mean, stdev
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
     import aiohttp
@@ -99,15 +99,101 @@ _PRICES_7D_PATTERN = re.compile(r"\[PREZZI_7G:([\d.]+(?:,[\d.]+){6})\]", re.IGNO
 _MIN_PLAUSIBLE_PRICE = 0.3
 _MAX_PLAUSIBLE_PRICE = 5.0
 
-# Italian excise duties (accise) — updated periodically by decree
-_ACCISE = {
-    "Benzina": 0.7284,
-    "Gasolio": 0.6174,
-    "GPL": 0.2928,
-    "Metano": 0.0000,
-    "HVO": 0.6174,
-    "Gasolio Riscaldamento": 0.4030,
+# ---------------------------------------------------------------------------
+# Italian excise duties (accise) — with optional government discount support
+# ---------------------------------------------------------------------------
+# HOW TO UPDATE when the government issues a new decree:
+#   1. Set `reduction` to the discount in EUR/L (e.g. 0.25 for DL 14/2022).
+#   2. Set `reduction_expires` to the decree expiry date as "YYYY-MM-DD",
+#      or None if no known expiry.
+#   3. Set `notes` to a short reference (e.g. "DL 14/2022, prorogato con DL X/20XX").
+# Sources: Gazzetta Ufficiale (gazzettaufficiale.it), ADM (adm.gov.it/portale).
+# ---------------------------------------------------------------------------
+
+
+class _AccisePolicy(NamedTuple):
+    """Excise duty policy for a single fuel type.
+
+    Fields:
+        base:               Statutory rate in EUR/L (D.Lgs 504/1995 + amendments).
+        reduction:          Active government discount in EUR/L (0.0 = none).
+        reduction_expires:  Decree expiry date as "YYYY-MM-DD", or None if unknown.
+        notes:              Free-text decree reference (e.g. "DL 14/2022 prorogato").
+    """
+    base: float
+    reduction: float
+    reduction_expires: str | None
+    notes: str
+
+
+_ACCISE_POLICY: dict[str, _AccisePolicy] = {
+    # As of April 2026 no temporary discount is active; update if government
+    # reintroduces a cut (e.g. the "taglio accise" last used in 2022–2023).
+    "Benzina":              _AccisePolicy(0.7284, 0.0, None, "D.Lgs 504/1995 e s.m.i."),
+    "Gasolio":              _AccisePolicy(0.6174, 0.0, None, "D.Lgs 504/1995 e s.m.i."),
+    "GPL":                  _AccisePolicy(0.2928, 0.0, None, "D.Lgs 504/1995 e s.m.i."),
+    "Metano":               _AccisePolicy(0.0000, 0.0, None, "D.Lgs 504/1995 — esentato"),
+    "HVO":                  _AccisePolicy(0.6174, 0.0, None, "Assimilato gasolio"),
+    "Gasolio Riscaldamento": _AccisePolicy(0.4030, 0.0, None, "D.Lgs 504/1995 — uso riscaldamento"),
 }
+
+
+def _fiscal_context(fuel_type: str) -> str:
+    """Return the STRUTTURA FISCALE prompt section for *fuel_type*.
+
+    Includes effective rate (base − reduction), expiry countdown with
+    graduated urgency warnings, and explicit AI instruction to cross-check
+    news headlines for any recent decree changes.
+    """
+    policy = _ACCISE_POLICY.get(fuel_type, _AccisePolicy(0.0, 0.0, None, ""))
+    effective = round(policy.base - policy.reduction, 4)
+    today = date.today()
+
+    lines: list[str] = [
+        f"• Aliquota ordinaria (legge):   {policy.base:.4f} EUR/L",
+    ]
+
+    if policy.reduction > 0:
+        lines.append(f"• Riduzione governativa attiva: -{policy.reduction:.4f} EUR/L  ({policy.notes})")
+        lines.append(f"• Aliquota EFFETTIVA attuale:   {effective:.4f} EUR/L")
+
+        if policy.reduction_expires:
+            expiry = date.fromisoformat(policy.reduction_expires)
+            days_left = (expiry - today).days
+            if days_left <= 0:
+                lines.append(
+                    f"⚠️ SCONTO SCADUTO il {policy.reduction_expires} — l'aliquota ordinaria "
+                    f"({policy.base:.4f} EUR/L) è in vigore salvo rinnovo non ancora rilevato."
+                )
+            elif days_left <= 3:
+                lines.append(
+                    f"⚠️ SCADENZA IMMINENTE ({policy.reduction_expires}, tra {days_left} giorno/i) — "
+                    f"se non rinnovato i prezzi aumenteranno di ~{policy.reduction:.4f} EUR/L."
+                )
+            elif days_left <= 14:
+                lines.append(
+                    f"⚠️ SCADENZA TRA {days_left} GIORNI ({policy.reduction_expires}) — "
+                    f"monitorare rinnovo decreto; potenziale rincaro di ~{policy.reduction:.4f} EUR/L."
+                )
+            else:
+                lines.append(
+                    f"• Scadenza sconto: {policy.reduction_expires} (tra {days_left} giorni)"
+                )
+        else:
+            lines.append("• Scadenza sconto: non ancora comunicata dal governo")
+
+        lines.append(
+            "→ Verifica i titoli di notizie sopra per aggiornamenti recenti su rinnovo o "
+            "scadenza di questo decreto. Una scadenza non rinnovata equivale a un rincaro "
+            f"immediato di ~{policy.reduction:.4f} EUR/L al distributore."
+        )
+    else:
+        lines.append(f"• Aliquota effettiva:           {effective:.4f} EUR/L  (nessun sconto governativo attivo)")
+        lines.append(f"• Riferimento normativo:        {policy.notes}")
+
+    lines.append("• IVA: 22%  •  Componente fiscale totale: ~65% del prezzo finale")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +707,7 @@ def _build_geopolitical_prompt(
     """
     today = date.today().isoformat()
     seasonal = _seasonal_context()
-    accisa = _ACCISE.get(fuel_type, 0.0)
+    fiscal_section = _fiscal_context(fuel_type)
 
     # ---- Real-time market data section (Brent, TTF, ETS, EUR/USD, news) -----
     market_section = _build_market_section(market_context)
@@ -786,7 +872,7 @@ def _build_geopolitical_prompt(
 {weekly_section}
 
 === STRUTTURA FISCALE {fuel_type.upper()} (IT) ===
-• Accisa: {accisa:.4f} EUR/L  •  IVA: 22%  •  Componente fiscale totale: ~65% del prezzo finale
+{fiscal_section}
 
 === CONTESTO STAGIONALE ===
 {seasonal}
@@ -829,7 +915,10 @@ FATTORI MACROECONOMICI E VALUTARI
 • Inflazione e PIL eurozona/Italia: impatto su domanda carburanti
 
 POLITICHE ITALIANE E UE
-• Governo italiano: eventuale rinnovo/modifica sconti accise, tetti di prezzo, misure di emergenza
+• Accise: le aliquote effettive sono indicate nella sezione STRUTTURA FISCALE sopra. Controlla i
+  titoli di notizie per confermare se l'eventuale decreto di sconto è stato rinnovato o è scaduto.
+  Una scadenza non rinnovata equivale a un rincaro immediato pari alla riduzione in atto.
+• Governo italiano: tetti di prezzo, misure di emergenza, nuovi provvedimenti fiscali sui carburanti
 • UE: RED III (quote biocarburanti), fit-for-55, eventuali sanzioni energetiche aggiuntive a Russia
 • Transizione energetica: velocità adozione EV in Italia (impatto domanda benzina/diesel a medio termine)
 • ARERA e Garante prezzi carburanti: eventuali interventi regolatori

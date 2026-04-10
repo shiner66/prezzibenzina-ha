@@ -195,7 +195,7 @@ class TestFetchNews:
     async def test_happy_path_returns_titles(self):
         session = _make_session(None, text=_SAMPLE_RSS)
         from aiohttp import ClientTimeout
-        headlines = await _fetch_news(session, ClientTimeout(total=10))
+        headlines = await _fetch_news(session, "https://example.com/rss", 10, ClientTimeout(total=10))
         assert len(headlines) == 3
         # Source stripped from first headline
         assert "Il Sole 24 Ore" not in headlines[0]
@@ -206,7 +206,7 @@ class TestFetchNews:
         empty_rss = '<?xml version="1.0"?><rss version="2.0"><channel></channel></rss>'
         session = _make_session(None, text=empty_rss)
         from aiohttp import ClientTimeout
-        headlines = await _fetch_news(session, ClientTimeout(total=10))
+        headlines = await _fetch_news(session, "https://example.com/rss", 10, ClientTimeout(total=10))
         assert headlines == []
 
     @pytest.mark.asyncio
@@ -217,8 +217,8 @@ class TestFetchNews:
         rss = f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'
         session = _make_session(None, text=rss)
         from aiohttp import ClientTimeout
-        headlines = await _fetch_news(session, ClientTimeout(total=10))
-        assert len(headlines) <= 10
+        headlines = await _fetch_news(session, "https://example.com/rss", 5, ClientTimeout(total=10))
+        assert len(headlines) <= 5
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,11 @@ class TestAsyncFetchMarketContext:
                 ],
             ),
             patch("custom_components.carburanti_mimit.market._fetch_eurusd", return_value=1.08),
-            patch("custom_components.carburanti_mimit.market._fetch_news", return_value=["Headline 1"]),
+            patch(
+                "custom_components.carburanti_mimit.market._fetch_news",
+                # oil news task created first, fiscal news task second
+                side_effect=[["Headline 1"], ["Fiscal headline"]],
+            ),
         ):
             session = MagicMock()
             result = await async_fetch_market_context(session)
@@ -278,7 +282,8 @@ class TestAsyncFetchMarketContext:
         assert result.eurusd == pytest.approx(1.08)
         assert result.brent_eur == pytest.approx(72.5 / 1.08, abs=0.01)
         assert result.brent_change_pct == pytest.approx((72.5 - 70.0) / 70.0 * 100, abs=0.01)
-        assert result.news_headlines == ["Headline 1"]
+        # fiscal headlines come first in the combined list, then oil market headlines
+        assert result.news_headlines == ["Fiscal headline", "Headline 1"]
         # fetched_at should be very recent
         age = (datetime.now(timezone.utc) - result.fetched_at).total_seconds()
         assert age < 5
