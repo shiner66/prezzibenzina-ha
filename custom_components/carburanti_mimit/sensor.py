@@ -144,7 +144,7 @@ def _build_previous_ai(
     price_3d: float | None,
 ) -> dict | None:
     """Build a previous-AI dict for the feedback loop, or None if no data."""
-    if not (brief or risk_level or price_3d):
+    if brief is None and risk_level is None and price_3d is None:
         return None
     return {"brief": brief, "risk_level": risk_level, "price_3d": price_3d}
 

@@ -95,6 +95,10 @@ _SINTESI_PATTERN = re.compile(r"\[SINTESI:([^\]]{1,200})\]", re.IGNORECASE)
 # Pattern used to extract 7-day price forecast  [PREZZI_7G:1.750,1.748,...]
 _PRICES_7D_PATTERN = re.compile(r"\[PREZZI_7G:([\d.]+(?:,[\d.]+){6})\]", re.IGNORECASE)
 
+# Plausible retail fuel price range (EUR/L) used to validate AI-returned values
+_MIN_PLAUSIBLE_PRICE = 0.3
+_MAX_PLAUSIBLE_PRICE = 5.0
+
 # Italian excise duties (accise) — updated periodically by decree
 _ACCISE = {
     "Benzina": 0.7284,
@@ -747,9 +751,10 @@ def _build_geopolitical_prompt(
         if previous_ai.get("risk_level"):
             prev_lines.append(f"• Rischio stimato:     {previous_ai['risk_level']}")
         if previous_ai.get("price_3d") is not None:
-            prev_lines.append(f"• Prezzo +3g stimato:  {previous_ai['price_3d']:.4f} EUR/L")
+            prev_price_3d: float = previous_ai["price_3d"]
+            prev_lines.append(f"• Prezzo +3g stimato:  {prev_price_3d:.4f} EUR/L")
             if current_price is not None:
-                diff = current_price - previous_ai["price_3d"]
+                diff = current_price - prev_price_3d
                 sign = "+" if diff >= 0 else ""
                 prev_lines.append(
                     f"• Prezzo attuale:      {current_price:.4f} EUR/L "
@@ -970,7 +975,7 @@ def _parse_prices_7d(text: str) -> list[float] | None:
         return None
     try:
         values = [round(float(v), 4) for v in match.group(1).split(",")]
-        if len(values) == 7 and all(0.3 <= v <= 5.0 for v in values):
+        if len(values) == 7 and all(_MIN_PLAUSIBLE_PRICE <= v <= _MAX_PLAUSIBLE_PRICE for v in values):
             return values
     except ValueError:
         pass
