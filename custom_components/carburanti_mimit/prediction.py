@@ -31,14 +31,14 @@ selected LLM API with a prompt that includes:
 
   • Real-time market data (Brent, TTF gas, ETS carbon, EUR/USD) from market.py
   • Recent oil market news headlines from Google News RSS
-  • 30-day local price history
+  • Up to 90-day local price history
   • Statistical indicators (trend, volatility, momentum, acceleration)
   • Seasonal demand context
   • Italian excise-tax (accise) and VAT structure
 
 The AI receives a dedicated *system* message with today's date and analyst role.
-A separate *user* message carries all the data.  Max tokens: 1200 (Claude) /
-1500 (OpenAI), up from 800 in previous versions.
+A separate *user* message carries all the data.  Max tokens: 2000 (Claude/OpenAI)
+to prioritize richer analysis over token savings.
 
 The LLM response uses structured tags: ``[RISCHIO:basso|medio|alto]``,
 ``[PREZZO_3G:X.XXX]``, ``[SINTESI:testo breve]``.
@@ -92,6 +92,12 @@ _RISK_PATTERN = re.compile(r"\[RISCHIO:(basso|medio|alto)\]", re.IGNORECASE)
 _PRICE_3D_PATTERN = re.compile(r"\[PREZZO_3G:([\d]+[.,][\d]+)\]", re.IGNORECASE)
 # Pattern used to extract the one-line AI summary  [SINTESI:testo breve]
 _SINTESI_PATTERN = re.compile(r"\[SINTESI:([^\]]{1,200})\]", re.IGNORECASE)
+# Max historical points injected into AI prompt (daily snapshots from storage).
+_AI_PROMPT_MAX_HISTORY_DAYS = 90
+_AI_PROMPT_DETAILED_RECENT_DAYS = 30
+_AI_PROMPT_WEEKLY_BLOCK = 7
+_AI_MAX_RESPONSE_TOKENS = 2000
+_AI_MIN_RESPONSE_TOKENS = 900
 
 # Italian excise duties (accise) — updated periodically by decree
 _ACCISE = {
@@ -597,16 +603,13 @@ def _build_geopolitical_prompt(
     market_section = _build_market_section(market_context)
 
     # ---- Price / history section ----------------------------------------
-    recent = history[-30:] if history else []
+    recent = history[-_AI_PROMPT_MAX_HISTORY_DAYS:] if history else []
     if recent:
-        history_lines = [
-            f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
-            for s in recent
-        ]
-        history_text = "\n".join(history_lines)
+        history_text = _format_history_for_prompt(recent)
         data_days = len([s for s in recent if s.cheapest is not None])
         price_section = (
-            f"=== DATI STORICI LOCALI — {fuel_type} (ultimi {data_days} giorni, fino al {today}) ===\n"
+            f"=== DATI STORICI LOCALI — {fuel_type} "
+            f"(ultimi {data_days} giorni disponibili, max {_AI_PROMPT_MAX_HISTORY_DAYS}, fino al {today}) ===\n"
             f"{history_text}"
         )
     elif current_price is not None:
@@ -682,6 +685,20 @@ def _build_geopolitical_prompt(
 === CONTESTO STAGIONALE ===
 {seasonal}
 
+=== CONTESTO AGGIUNTIVO DISPONIBILE (massimo dettaglio entro budget token) ===
+• Storico locale fino a 90 giorni: dettaglio giornaliero recente + riepilogo settimanale parte più vecchia
+• Dati market real-time (Brent/TTF/ETS/EURUSD) + headline recenti per ridurre allucinazioni temporali
+• Obiettivo: privilegiare accuratezza previsionale restando nel limite token
+• In caso di conflitto, priorità ai dati numerici forniti nel prompt rispetto a stime generiche
+
+=== PRIORITÀ CAUSALE (breve periodo, prezzo alla pompa) ===
+Pesa esplicitamente i driver in quest'ordine:
+1) Geopolitica internazionale e rischio supply shock (guerre, sanzioni, stretto di Hormuz, Mar Rosso)
+2) Decisioni governi / regolatori (accise, sussidi, misure emergenziali, policy UE)
+3) Variabili mercato-finanza (Brent, crack spread, EUR/USD, TTF, ETS)
+4) Dinamiche locali/statistiche (trend ultimi giorni, stagionalità, rumore locale)
+Se i fattori 1-2 sono in forte movimento, prevalgono sull'inerzia statistica.
+
 === FRAMEWORK DI ANALISI — considera TUTTI i fattori rilevanti ===
 
 MERCATO PETROLIFERO GLOBALE
@@ -731,7 +748,8 @@ Rispondi SOLO in italiano con questo formato esatto:
 **ANALISI** (4-6 frasi):
 [Analisi geopolitica e di mercato che spiega i fattori principali {context_verb}.
 Integra la tua conoscenza aggiornata con i dati forniti. Sii specifico su quali eventi
-concreti stanno influenzando o potrebbero influenzare il prezzo.]
+concreti stanno influenzando o potrebbero influenzare il prezzo.
+Nelle prime 2 frasi dai priorità a geopolitica e decisioni governative/regolatorie.]
 
 **STIMA 3 GIORNI**:
 [Una frase sulla tua stima del prezzo tra 3 giorni considerando tutti i fattori sopra.
@@ -746,7 +764,65 @@ Poi su una riga separata SOLO il tag: [RISCHIO:basso] oppure [RISCHIO:medio] opp
 Es: "Brent stabile, OPEC+ invariato, prezzi locali in linea con media."
 Poi su una riga separata SOLO il tag: [SINTESI:testo max 12 parole]]
 
+**JSON FACOLTATIVO (una sola riga, senza markdown)**:
+[{{
+  "driver_scores": {{"geopolitica": 0-100, "policy": 0-100, "mercato_fx": 0-100, "statistica_locale": 0-100}},
+  "scenario": {{"base": "up|down|stable", "upside_risk": "basso|medio|alto", "downside_risk": "basso|medio|alto"}}
+}}]
+
 Nessuna formula di cortesia. Solo analisi diretta e concisa."""
+
+
+def _format_history_for_prompt(recent: list[DailySnapshot]) -> str:
+    """Format history for prompt with token-aware compaction.
+
+    Keeps daily detail for recent days and compresses older days into weekly
+    summary blocks to stay within token limits while preserving context.
+    """
+    if len(recent) <= _AI_PROMPT_DETAILED_RECENT_DAYS:
+        return "\n".join(
+            f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
+            for s in recent
+        )
+
+    split = len(recent) - _AI_PROMPT_DETAILED_RECENT_DAYS
+    older = recent[:split]
+    newest = recent[split:]
+
+    lines: list[str] = ["  -- RIEPILOGO STORICO (parte meno recente, blocchi settimanali) --"]
+    for i in range(0, len(older), _AI_PROMPT_WEEKLY_BLOCK):
+        chunk = older[i:i + _AI_PROMPT_WEEKLY_BLOCK]
+        values = [s.cheapest for s in chunk if s.cheapest is not None]
+        if values:
+            lines.append(
+                f"  {chunk[0].date}→{chunk[-1].date}: "
+                f"avg={mean(values):.4f} min={min(values):.4f} max={max(values):.4f}"
+            )
+        else:
+            lines.append(f"  {chunk[0].date}→{chunk[-1].date}: N/D")
+
+    lines.append("  -- DETTAGLIO GIORNALIERO (ultimi 30 giorni) --")
+    lines.extend(
+        f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
+        for s in newest
+    )
+    return "\n".join(lines)
+
+
+def _response_token_budget(prompt: str) -> int:
+    """Return a dynamic max_tokens budget based on prompt size.
+
+    We keep responses detailed when prompt is moderate, but reduce the response
+    token cap when prompt is very long to avoid unnecessary token pressure.
+    """
+    chars = len(prompt)
+    if chars < 10_000:
+        return _AI_MAX_RESPONSE_TOKENS
+    if chars < 16_000:
+        return 1_500
+    if chars < 22_000:
+        return 1_200
+    return _AI_MIN_RESPONSE_TOKENS
 
 
 def _build_market_section(market_context: MarketContext | None) -> str:
@@ -879,7 +955,7 @@ async def _call_claude(
     }
     payload = {
         "model": model or DEFAULT_AI_MODEL_CLAUDE,
-        "max_tokens": 1200,
+        "max_tokens": _response_token_budget(prompt),
         "system": _ai_system_message(),
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -913,7 +989,7 @@ async def _call_openai(
     }
     payload = {
         "model": model or DEFAULT_AI_MODEL_OPENAI,
-        "max_tokens": 1500,
+        "max_tokens": _response_token_budget(prompt),
         "messages": [
             {"role": "system", "content": _ai_system_message()},
             {"role": "user", "content": prompt},

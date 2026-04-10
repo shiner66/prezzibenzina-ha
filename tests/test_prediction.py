@@ -7,8 +7,12 @@ import pytest
 
 from custom_components.carburanti_mimit.prediction import (
     PredictionResult,
+    _AI_PROMPT_MAX_HISTORY_DAYS,
+    _AI_PROMPT_DETAILED_RECENT_DAYS,
     _ewols_regression,
+    _build_geopolitical_prompt,
     _holt_exponential_smoothing,
+    _response_token_budget,
     compute_prediction,
 )
 from custom_components.carburanti_mimit.storage import DailySnapshot
@@ -256,6 +260,48 @@ class TestHoltExponentialSmoothing:
         forecasts = _holt_exponential_smoothing([1.800])
         assert len(forecasts) == 7
         assert all(f == pytest.approx(1.800) for f in forecasts)
+
+
+class TestAIPromptContextExpansion:
+    def test_prompt_uses_up_to_90_days_of_history(self):
+        # 120 points -> prompt should include only the latest 90 entries.
+        history = _make_history([1.700 + i * 0.001 for i in range(120)])
+        prompt = _build_geopolitical_prompt(history, "Benzina", prediction=None)
+
+        assert f"max {_AI_PROMPT_MAX_HISTORY_DAYS}" in prompt
+        assert "RIEPILOGO STORICO" in prompt
+        assert "DETTAGLIO GIORNALIERO" in prompt
+        # Oldest 30 entries should be trimmed out.
+        assert f"{history[0].date}: " not in prompt
+        assert f"{history[29].date}: " not in prompt
+        # Oldest day in 90-day window appears in weekly summary format.
+        assert f"{history[30].date}→" in prompt
+        # Detailed daily data starts from the latest 30 days.
+        first_detailed_idx = len(history) - _AI_PROMPT_DETAILED_RECENT_DAYS
+        assert f"{history[first_detailed_idx].date}: " in prompt
+        # Latest entry must always be present.
+        assert f"{history[-1].date}: " in prompt
+
+    def test_prompt_prioritizes_geopolitics_and_government_choices(self):
+        history = _make_history([1.800 + i * 0.0005 for i in range(20)])
+        prompt = _build_geopolitical_prompt(history, "Gasolio", prediction=None)
+
+        assert "PRIORITÀ CAUSALE" in prompt
+        assert "Geopolitica internazionale e rischio supply shock" in prompt
+        assert "Decisioni governi / regolatori" in prompt
+        assert "prevalgono sull'inerzia statistica" in prompt
+
+    def test_prompt_requests_optional_json_block(self):
+        history = _make_history([1.800 + i * 0.0005 for i in range(20)])
+        prompt = _build_geopolitical_prompt(history, "Gasolio", prediction=None)
+        assert "JSON FACOLTATIVO" in prompt
+        assert '"driver_scores"' in prompt
+
+    def test_response_token_budget_scales_down_for_very_long_prompts(self):
+        assert _response_token_budget("x" * 2_000) == 2000
+        assert _response_token_budget("x" * 12_000) == 1500
+        assert _response_token_budget("x" * 18_000) == 1200
+        assert _response_token_budget("x" * 30_000) == 900
 
 
 class TestEnsembleMethod:
