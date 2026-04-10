@@ -92,6 +92,8 @@ _RISK_PATTERN = re.compile(r"\[RISCHIO:(basso|medio|alto)\]", re.IGNORECASE)
 _PRICE_3D_PATTERN = re.compile(r"\[PREZZO_3G:([\d]+[.,][\d]+)\]", re.IGNORECASE)
 # Pattern used to extract the one-line AI summary  [SINTESI:testo breve]
 _SINTESI_PATTERN = re.compile(r"\[SINTESI:([^\]]{1,200})\]", re.IGNORECASE)
+# Pattern used to extract 7-day price forecast  [PREZZI_7G:1.750,1.748,...]
+_PRICES_7D_PATTERN = re.compile(r"\[PREZZI_7G:([\d.]+(?:,[\d.]+){6})\]", re.IGNORECASE)
 
 # Italian excise duties (accise) — updated periodically by decree
 _ACCISE = {
@@ -517,7 +519,10 @@ async def async_ai_prediction(
     market_context: MarketContext | None = None,
     openai_model: str | None = None,
     claude_model: str | None = None,
-) -> tuple[str | None, str | None, float | None, str | None]:
+    area_stats: dict | None = None,
+    top_stations: list | None = None,
+    previous_ai: dict | None = None,
+) -> tuple[str | None, str | None, float | None, str | None, list[float] | None]:
     """Call an LLM for a geopolitical and market analysis of the price trend.
 
     Works from day 1: when *prediction* is ``None`` the prompt focuses on pure
@@ -528,17 +533,28 @@ async def async_ai_prediction(
     prices and news headlines directly into the prompt so the AI reasons from
     today's actual market data, not its training-data cutoff.
 
-    Returns ``(ai_analysis, ai_risk_level, ai_price_3d, ai_brief)`` or
-    ``(None, None, None, None)`` on error.
+    *area_stats* is a dict with keys cheapest_price, average_price,
+    self_cheapest_price, servito_cheapest_price, station_count.
+
+    *top_stations* is a list of dicts with keys bandiera, nome, distance_km,
+    price, is_self.
+
+    *previous_ai* is a dict with keys brief, risk_level, price_3d holding the
+    results of the last AI call, used to build a calibration feedback loop.
+
+    Returns ``(ai_analysis, ai_risk_level, ai_price_3d, ai_brief, ai_prices_7d)``
+    or ``(None, None, None, None, None)`` on error.
     - ai_analysis:    full geopolitical analysis text
     - ai_risk_level:  "basso" | "medio" | "alto" parsed from [RISCHIO:...] tag
     - ai_price_3d:    AI-estimated price in 3 days parsed from [PREZZO_3G:...] tag
     - ai_brief:       one-sentence summary parsed from [SINTESI:...] tag
+    - ai_prices_7d:   7-day daily price forecast parsed from [PREZZI_7G:...] tag
     """
     from .const import AI_PROVIDER_CLAUDE, AI_PROVIDER_OPENAI  # avoid circular at top
 
     prompt = _build_geopolitical_prompt(
-        history, fuel_type, prediction, current_price, national_average, market_context
+        history, fuel_type, prediction, current_price, national_average,
+        market_context, area_stats, top_stations, previous_ai,
     )
 
     try:
@@ -547,27 +563,31 @@ async def async_ai_prediction(
         elif provider == AI_PROVIDER_OPENAI:
             text = await _call_openai(session, api_key, prompt, openai_model)
         else:
-            return None, None, None, None
+            return None, None, None, None, None
 
         if not text:
             _LOGGER.warning("AI call returned empty response")
-            return None, None, None, None
+            return None, None, None, None, None
 
         risk = _parse_risk_level(text)
         price_3d = _parse_price_3d(text)
         brief = _parse_brief(text)
+        prices_7d = _parse_prices_7d(text)
         if brief is None:
             _LOGGER.warning(
                 "AI response missing [SINTESI:] tag — response preview: %.300s",
                 text,
             )
         else:
-            _LOGGER.debug("AI parsed — risk=%s price_3d=%s brief=%s", risk, price_3d, brief)
-        return text.strip(), risk, price_3d, brief
+            _LOGGER.debug(
+                "AI parsed — risk=%s price_3d=%s brief=%s prices_7d=%s",
+                risk, price_3d, brief, prices_7d,
+            )
+        return text.strip(), risk, price_3d, brief, prices_7d
 
     except Exception as exc:  # noqa: BLE001
         _LOGGER.warning("AI prediction call failed (%s: %s) — skipping", type(exc).__name__, exc)
-    return None, None, None, None
+    return None, None, None, None, None
 
 
 def _build_geopolitical_prompt(
@@ -577,17 +597,23 @@ def _build_geopolitical_prompt(
     current_price: float | None = None,
     national_average: float | None = None,
     market_context: MarketContext | None = None,
+    area_stats: dict | None = None,
+    top_stations: list | None = None,
+    previous_ai: dict | None = None,
 ) -> str:
     """Build an adaptive prompt for geopolitical + market analysis.
 
     Enrichment levels:
     - No history  → pure geopolitical/market context for the current price
-    - Some history → adds observed price trend
+    - Some history → adds observed price trend (cheapest + avg, up to 90 days)
     - Full stats   → adds 7-day forecast, volatility, momentum, acceleration
 
-    When *market_context* is provided the prompt leads with real-time Brent,
-    TTF, ETS, EUR/USD prices and news headlines so the AI reasons from today's
-    market data, not its training-data cutoff.
+    Additional context included when available:
+    - Real-time market data (Brent, TTF, ETS, EUR/USD, up to 10 news headlines)
+    - Area statistics (spread, self/servito split, station count)
+    - Top-N local stations (brand, price, distance)
+    - Previous AI analysis for calibration (feedback loop)
+    - Weekly price pattern (average by day-of-week)
     """
     today = date.today().isoformat()
     seasonal = _seasonal_context()
@@ -596,15 +622,17 @@ def _build_geopolitical_prompt(
     # ---- Real-time market data section (Brent, TTF, ETS, EUR/USD, news) -----
     market_section = _build_market_section(market_context)
 
-    # ---- Price / history section ----------------------------------------
-    recent = history[-30:] if history else []
-    if recent:
-        history_lines = [
-            f"  {s.date}: {s.cheapest:.4f} EUR/L" if s.cheapest is not None else f"  {s.date}: N/D"
-            for s in recent
-        ]
+    # ---- Price / history section (up to 90 days, cheapest + avg) -----------
+    if history:
+        history_lines = []
+        for s in history:
+            cheapest_txt = f"{s.cheapest:.4f}" if s.cheapest is not None else "N/D"
+            avg_txt = f"{s.average:.4f}" if s.average is not None else "N/D"
+            history_lines.append(
+                f"  {s.date}: cheapest={cheapest_txt}  avg={avg_txt}  EUR/L"
+            )
         history_text = "\n".join(history_lines)
-        data_days = len([s for s in recent if s.cheapest is not None])
+        data_days = len([s for s in history if s.cheapest is not None])
         price_section = (
             f"=== DATI STORICI LOCALI — {fuel_type} (ultimi {data_days} giorni, fino al {today}) ===\n"
             f"{history_text}"
@@ -670,11 +698,87 @@ def _build_geopolitical_prompt(
         )
         context_verb = "che determinano il livello di prezzo attuale"
 
+    # ---- Area statistics section ----------------------------------------
+    if area_stats:
+        area_lines = ["\n=== AREA LOCALE OGGI ==="]
+        if area_stats.get("cheapest_price") is not None:
+            area_lines.append(f"• Prezzo più basso:    {area_stats['cheapest_price']:.4f} EUR/L")
+        if area_stats.get("average_price") is not None:
+            area_lines.append(f"• Prezzo medio area:   {area_stats['average_price']:.4f} EUR/L")
+        if (area_stats.get("cheapest_price") is not None
+                and area_stats.get("average_price") is not None):
+            spread = area_stats["average_price"] - area_stats["cheapest_price"]
+            area_lines.append(f"• Spread min/media:    {spread:.4f} EUR/L")
+        if area_stats.get("self_cheapest_price") is not None:
+            area_lines.append(f"• Miglior self:        {area_stats['self_cheapest_price']:.4f} EUR/L")
+        if area_stats.get("servito_cheapest_price") is not None:
+            area_lines.append(f"• Miglior servito:     {area_stats['servito_cheapest_price']:.4f} EUR/L")
+        if area_stats.get("station_count"):
+            area_lines.append(f"• Stazioni nell'area:  {area_stats['station_count']}")
+        area_section = "\n".join(area_lines)
+    else:
+        area_section = ""
+
+    # ---- Top stations section -------------------------------------------
+    if top_stations:
+        top_lines = ["\n=== TOP STAZIONI LOCALI ==="]
+        for s in top_stations[:5]:
+            parts: list[str] = []
+            bandiera = s.get("bandiera", "").strip()
+            nome = s.get("nome", "").strip()
+            label = f"{bandiera} — {nome}" if bandiera and nome else (bandiera or nome or "?")
+            dist = s.get("distance_km")
+            dist_txt = f"{dist:.1f}km" if dist is not None else ""
+            svc = "self" if s.get("is_self") else "serv"
+            price = s.get("price")
+            price_txt = f"{price:.3f}" if price is not None else "N/D"
+            top_lines.append(f"  {label}  {dist_txt}  [{svc}] {price_txt} EUR/L")
+        top_stations_section = "\n".join(top_lines)
+    else:
+        top_stations_section = ""
+
+    # ---- Previous AI feedback loop section ------------------------------
+    if previous_ai and (
+        previous_ai.get("brief") or previous_ai.get("risk_level") or previous_ai.get("price_3d")
+    ):
+        prev_lines = ["\n=== CALIBRAZIONE: ANALISI AI PRECEDENTE ==="]
+        if previous_ai.get("brief"):
+            prev_lines.append(f"• Sintesi precedente:  \"{previous_ai['brief']}\"")
+        if previous_ai.get("risk_level"):
+            prev_lines.append(f"• Rischio stimato:     {previous_ai['risk_level']}")
+        if previous_ai.get("price_3d") is not None:
+            prev_lines.append(f"• Prezzo +3g stimato:  {previous_ai['price_3d']:.4f} EUR/L")
+            if current_price is not None:
+                diff = current_price - previous_ai["price_3d"]
+                sign = "+" if diff >= 0 else ""
+                prev_lines.append(
+                    f"• Prezzo attuale:      {current_price:.4f} EUR/L "
+                    f"(scostamento: {sign}{diff:.4f} EUR/L)"
+                )
+        prev_lines.append(
+            "→ Tieni conto dell'accuratezza della previsione precedente "
+            "nel calibrare quella attuale."
+        )
+        previous_ai_section = "\n".join(prev_lines)
+    else:
+        previous_ai_section = ""
+
+    # ---- Weekly price pattern (average by day-of-week) ------------------
+    weekly_pattern = _weekly_price_pattern(history)
+    if weekly_pattern:
+        weekly_section = f"\n=== PATTERN SETTIMANALE PREZZI (medie per giorno) ===\n{weekly_pattern}"
+    else:
+        weekly_section = ""
+
     return f"""=== DATA ANALISI: {today} ===
 {market_section}
 {price_section}
 {stats_section}
 {nat_section}
+{area_section}
+{top_stations_section}
+{previous_ai_section}
+{weekly_section}
 
 === STRUTTURA FISCALE {fuel_type.upper()} (IT) ===
 • Accisa: {accisa:.4f} EUR/L  •  IVA: 22%  •  Componente fiscale totale: ~65% del prezzo finale
@@ -736,6 +840,12 @@ concreti stanno influenzando o potrebbero influenzare il prezzo.]
 **STIMA 3 GIORNI**:
 [Una frase sulla tua stima del prezzo tra 3 giorni considerando tutti i fattori sopra.
 Poi su una riga separata SOLO il tag: [PREZZO_3G:X.XXX] con il prezzo stimato in EUR/L (es. [PREZZO_3G:1.752])]
+
+**PREVISIONE 7 GIORNI**:
+[Una frase sulla tua previsione dei prezzi nei prossimi 7 giorni.
+Poi su una riga separata SOLO il tag con 7 prezzi in EUR/L separati da virgola:
+[PREZZI_7G:X.XXX,X.XXX,X.XXX,X.XXX,X.XXX,X.XXX,X.XXX]
+(giorno +1, +2, +3, +4, +5, +6, +7 — usa il punto come separatore decimale, es. [PREZZI_7G:1.750,1.748,1.745,1.743,1.742,1.741,1.740])]
 
 **RISCHIO RINCARI 2 SETTIMANE**:
 [Una frase sul rischio.
@@ -849,6 +959,55 @@ def _parse_brief(text: str) -> str | None:
     return None
 
 
+def _parse_prices_7d(text: str) -> list[float] | None:
+    """Extract 7-day price forecast from [PREZZI_7G:1.750,1.748,...] tag.
+
+    Expects exactly 7 dot-separated prices in EUR/L, comma-delimited.
+    Returns None if the tag is absent or any value is outside a plausible range.
+    """
+    match = _PRICES_7D_PATTERN.search(text)
+    if not match:
+        return None
+    try:
+        values = [round(float(v), 4) for v in match.group(1).split(",")]
+        if len(values) == 7 and all(0.3 <= v <= 5.0 for v in values):
+            return values
+    except ValueError:
+        pass
+    return None
+
+
+def _weekly_price_pattern(history: list[DailySnapshot]) -> str | None:
+    """Return average cheapest price per day-of-week from history, or None.
+
+    With ≥14 days of history each weekday should have at least 2 observations,
+    giving a reliable intra-week pattern the AI can use to recognise whether
+    today is a typically cheap or expensive day for re-fuelling.
+    """
+    day_prices: dict[int, list[float]] = {i: [] for i in range(7)}
+    for s in history:
+        if s.cheapest is None:
+            continue
+        try:
+            d = date.fromisoformat(s.date)
+            day_prices[d.weekday()].append(s.cheapest)
+        except (ValueError, AttributeError):
+            continue
+
+    if not any(day_prices.values()):
+        return None
+
+    day_names = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+    parts: list[str] = []
+    for i, name in enumerate(day_names):
+        prices = day_prices[i]
+        if prices:
+            parts.append(f"{name}={mean(prices):.3f}")
+        else:
+            parts.append(f"{name}=N/D")
+    return "  ".join(parts)
+
+
 def _ai_system_message() -> str:
     """Return the system message for AI calls, including today's date."""
     today = date.today().isoformat()
@@ -879,7 +1038,7 @@ async def _call_claude(
     }
     payload = {
         "model": model or DEFAULT_AI_MODEL_CLAUDE,
-        "max_tokens": 1200,
+        "max_tokens": 2500,
         "system": _ai_system_message(),
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -913,7 +1072,7 @@ async def _call_openai(
     }
     payload = {
         "model": model or DEFAULT_AI_MODEL_OPENAI,
-        "max_tokens": 1500,
+        "max_tokens": 3000,
         "messages": [
             {"role": "system", "content": _ai_system_message()},
             {"role": "user", "content": prompt},

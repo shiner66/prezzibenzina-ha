@@ -212,13 +212,13 @@ class TestFetchNews:
     @pytest.mark.asyncio
     async def test_max_5_headlines(self):
         items = "\n".join(
-            f"<item><title>Notizia {i} - Fonte</title></item>" for i in range(10)
+            f"<item><title>Notizia {i} - Fonte</title></item>" for i in range(15)
         )
         rss = f'<?xml version="1.0"?><rss version="2.0"><channel>{items}</channel></rss>'
         session = _make_session(None, text=rss)
         from aiohttp import ClientTimeout
         headlines = await _fetch_news(session, ClientTimeout(total=10))
-        assert len(headlines) <= 5
+        assert len(headlines) <= 10
 
 
 # ---------------------------------------------------------------------------

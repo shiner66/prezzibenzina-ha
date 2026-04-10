@@ -46,7 +46,7 @@ _GNEWS_URL = (
 )
 
 _FETCH_TIMEOUT_S = 10   # per individual HTTP request
-_NEWS_MAX = 5           # number of headlines to keep
+_NEWS_MAX = 10          # number of headlines to keep
 _SOURCE_RE = re.compile(r"\s*-\s*[^-]+$")   # strips " - Fonte" from titles
 
 

@@ -194,8 +194,8 @@ OPENAI_FREE_TIER_DAILY: dict[str, int] = {
     "o1":               250_000,
 }
 
-# Estimated tokens consumed per AI call (prompt ~2 000 + response ~1 500)
-AI_TOKENS_PER_CALL_EST = 3_500
+# Estimated tokens consumed per AI call (prompt ~2 750 + response ~3 000)
+AI_TOKENS_PER_CALL_EST = 5_750
 
 # ---------------------------------------------------------------------------
 # Market data (real-time, no API key required)

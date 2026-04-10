@@ -25,6 +25,7 @@ class DailySnapshot:
     fuel_type: str
     cheapest: float | None
     average: float | None
+    national_average: float | None = None  # national average price (from MIMIT regional CSV)
 
 
 class HistoryStorage:
@@ -65,6 +66,7 @@ class HistoryStorage:
                         fuel_type=s["fuel_type"],
                         cheapest=s.get("cheapest"),
                         average=s.get("average"),
+                        national_average=s.get("national_average"),
                     )
                     for s in snapshots
                     if isinstance(s, dict)
@@ -84,6 +86,7 @@ class HistoryStorage:
                 fuel_type=fuel_type,
                 cheapest=area.cheapest_price,
                 average=area.average_price,
+                national_average=area.national_average,
             )
             if fuel_type not in self._data:
                 self._data[fuel_type] = []
