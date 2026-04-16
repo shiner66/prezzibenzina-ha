@@ -2,18 +2,29 @@
 
 Algorithm (ensemble)
 --------------------
-1. Extract price series from the last 30 days of HistoryStorage.
+1. Extract price series from the last 90 days of HistoryStorage.
 2. Interpolate small gaps (≤ 3 consecutive missing days) linearly.
-3. Fit Exponentially Weighted OLS (EWOLS) over the last 14 points — recent
+3. Fit Exponentially Weighted OLS (EWOLS) over the last 21 points — recent
    prices get exponentially higher weight (alpha=0.15).
 4. Run Holt's Double Exponential Smoothing (level + trend, α=0.3, β=0.1).
-5. Ensemble:
-   - If EWOLS R² ≥ 0.6 AND ≥14 data points: 60% EWOLS + 40% Holt forecast.
-   - If ≥5 data points (but EWOLS R² < 0.6): Holt only.
+5. Run AR(1) on first-differenced series — models short-term price-change
+   persistence; each daily change is autocorrelated with the previous one.
+6. Ensemble (dynamic, based on available data and EWOLS R²):
+   - R²≥0.6 AND ≥14 pts AND ≥6 pts for AR1:
+       35% EWOLS + 35% Holt + 30% AR1  → ``ensemble_ols_holt_ar1``
+   - R²≥0.6 AND ≥14 pts, AR1 unavailable:
+       60% EWOLS + 40% Holt            → ``ensemble_ols_holt``
+   - R²<0.6 AND ≥5 pts AND ≥6 pts for AR1:
+       55% Holt + 45% AR1              → ``ensemble_holt_ar1``
+   - R²<0.6 AND ≥5 pts, AR1 unavailable:
+       Holt only                        → ``holt_exponential_smoothing``
    - Otherwise: linearly-weighted moving average (WMA) fallback.
-6. Volatility-adaptive clamping:
+7. Mean-reversion adjustment: when the current price deviates >4 % from the
+   long-term mean (all available history), a gentle linear pull is applied
+   before clamping — prevents unbounded trend extrapolation.
+8. Volatility-adaptive clamping:
    [max(0.5×μ₇, μ₇-3σ), min(2.0×μ₇, μ₇+3σ)]
-7. Confidence: high (≥30 pts, R²≥0.7) | medium (≥14 pts) | low (< 14 pts).
+9. Confidence: high (≥30 pts, R²≥0.7) | medium (≥14 pts) | low (< 14 pts).
 
 Additional statistical indicators
 ----------------------------------
@@ -77,10 +88,28 @@ _MAX_GAP_INTERPOLATE = 3
 
 # Ensemble algorithm parameters
 _EWOLS_ALPHA = 0.15   # exponential decay for OLS weights (older = less weight)
+_EWOLS_FIT_WINDOW = 21  # use up to 21 recent points for EWOLS (was 14)
 _HOLT_ALPHA  = 0.3    # Holt level smoothing
 _HOLT_BETA   = 0.1    # Holt trend smoothing
-_ENSEMBLE_WLS_WEIGHT  = 0.6   # when EWOLS R² ≥ threshold
+
+# 2-method ensemble weights (EWOLS + Holt, when AR1 unavailable and R²≥threshold)
+_ENSEMBLE_WLS_WEIGHT  = 0.6
 _ENSEMBLE_HOLT_WEIGHT = 0.4
+# 3-method ensemble weights (EWOLS + Holt + AR1)
+_ENSEMBLE3_WLS_WEIGHT  = 0.35
+_ENSEMBLE3_HOLT_WEIGHT = 0.35
+_ENSEMBLE3_AR1_WEIGHT  = 0.30
+# 2-method ensemble weights (Holt + AR1, when R²<threshold)
+_ENSEMBLE_HOLT_AR1_HOLT_WEIGHT = 0.55
+_ENSEMBLE_HOLT_AR1_AR1_WEIGHT  = 0.45
+
+# AR(1) on first differences
+_AR1_MIN_POINTS = 6        # need ≥6 prices to estimate 5 differences stably
+_AR1_PHI_MAX    = 0.90     # clamp phi to [-0.90, 0.90] to prevent explosion
+
+# Mean-reversion nudge (applied when current price deviates from long-term mean)
+_MEAN_REVERSION_THRESHOLD = 0.04   # 4 % deviation triggers the nudge
+_MEAN_REVERSION_DAILY_RATE = 0.004 # max 0.4 % of mean pulled back per day
 
 # AI API endpoints
 _CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
@@ -131,8 +160,9 @@ class PredictionResult:
     price_momentum: float | None      = None   # (mean_7d − mean_prev_7d) / mean_prev_7d × 100
     price_acceleration: float | None  = None   # EUR/day² (2nd derivative estimate)
 
-    # Statistical 3-day forecast (predicted_prices[2], already in predicted_prices)
+    # Statistical 3-day and 7-day forecasts (already in predicted_prices)
     predicted_price_3d: float | None   = None
+    predicted_price_7d: float | None   = None   # predicted_prices[6]
 
     # AI enrichment
     ai_analysis: str | None           = field(default=None)
@@ -190,36 +220,63 @@ def compute_prediction(
             price_acceleration=None,
         )
 
-    # --- Ensemble: EWOLS + Holt's Double Exponential Smoothing ---------------
-    fit_window = prices[-14:]
+    # --- Ensemble: EWOLS + Holt + AR(1) on differences ----------------------
+    fit_window = prices[-_EWOLS_FIT_WINDOW:]   # up to 21 recent points
     n = len(fit_window)
     xs = list(range(n))
 
     # Method 1: Exponentially Weighted OLS (recent prices get higher weight)
     slope_ew, intercept_ew, r2 = _ewols_regression(xs, fit_window, _EWOLS_ALPHA)
 
-    # Method 2: Holt's Double EMA (level + trend)
+    # Method 2: Holt's Double EMA (level + trend) — trained on all history
     holt_pred: list[float] | None = None
     if len(prices) >= _MIN_POINTS_HOLT:
         holt_pred = _holt_exponential_smoothing(prices, _HOLT_ALPHA, _HOLT_BETA, 7)
 
-    # Ensemble selection
-    if r2 >= _R2_THRESHOLD and len(prices) >= _MIN_POINTS_MEDIUM and holt_pred is not None:
-        method = "ensemble_ols_holt"
+    # Method 3: AR(1) on first differences — captures change-direction persistence
+    ar1_pred: list[float] | None = None
+    if len(prices) >= _AR1_MIN_POINTS:
+        ar1_pred = _ar1_diff_forecast(prices, 7)
+
+    # Ensemble selection (dynamic weights based on available methods and R²)
+    if r2 >= _R2_THRESHOLD and len(prices) >= _MIN_POINTS_MEDIUM:
         ewols_f = [intercept_ew + slope_ew * (n + i) for i in range(7)]
-        predicted = [
-            _ENSEMBLE_WLS_WEIGHT * ew + _ENSEMBLE_HOLT_WEIGHT * h
-            for ew, h in zip(ewols_f, holt_pred)
-        ]
+        if holt_pred is not None and ar1_pred is not None:
+            method = "ensemble_ols_holt_ar1"
+            predicted = [
+                _ENSEMBLE3_WLS_WEIGHT * ew
+                + _ENSEMBLE3_HOLT_WEIGHT * h
+                + _ENSEMBLE3_AR1_WEIGHT * a
+                for ew, h, a in zip(ewols_f, holt_pred, ar1_pred)
+            ]
+        elif holt_pred is not None:
+            method = "ensemble_ols_holt"
+            predicted = [
+                _ENSEMBLE_WLS_WEIGHT * ew + _ENSEMBLE_HOLT_WEIGHT * h
+                for ew, h in zip(ewols_f, holt_pred)
+            ]
+        else:
+            method = "moving_average"
+            predicted = _weighted_moving_average_forecast(prices, slope_ew)
         slope = slope_ew
     elif holt_pred is not None:
-        method = "holt_exponential_smoothing"
-        predicted = holt_pred
+        if ar1_pred is not None:
+            method = "ensemble_holt_ar1"
+            predicted = [
+                _ENSEMBLE_HOLT_AR1_HOLT_WEIGHT * h + _ENSEMBLE_HOLT_AR1_AR1_WEIGHT * a
+                for h, a in zip(holt_pred, ar1_pred)
+            ]
+        else:
+            method = "holt_exponential_smoothing"
+            predicted = holt_pred
         slope = (predicted[-1] - predicted[0]) / 6.0 if len(predicted) == 7 else 0.0
     else:
         method = "moving_average"
         slope = slope_ew
         predicted = _weighted_moving_average_forecast(prices, slope)
+
+    # Mean-reversion nudge (only when current price far from long-term mean)
+    predicted = _mean_reversion_adjustment(predicted, prices)
 
     # Volatility-adaptive clamping: [max(0.5×μ, μ-3σ), min(2.0×μ, μ+3σ)]
     prices_for_clamp = prices[-14:] if len(prices) >= 14 else prices
@@ -255,6 +312,7 @@ def compute_prediction(
         trend_pct_7d=round(trend_pct, 2),
         predicted_prices=predicted,
         predicted_price_3d=predicted[2] if len(predicted) >= 3 else None,
+        predicted_price_7d=predicted[6] if len(predicted) >= 7 else None,
         confidence=confidence_base,
         method_used=method,
         weekly_change_pct=round(weekly_change, 2) if weekly_change is not None else None,
@@ -477,6 +535,112 @@ def _price_acceleration(prices: list[float]) -> float | None:
     slope_first, _ = _linear_regression(xs_first, half[:7])
     slope_second, _ = _linear_regression(xs_second, half[7:])
     return round(slope_second - slope_first, 6)
+
+
+# ---------------------------------------------------------------------------
+# AR(1) on first differences
+# ---------------------------------------------------------------------------
+
+def _ar1_diff_forecast(
+    prices: list[float],
+    n_forecast: int = 7,
+) -> list[float]:
+    """AR(1) on first-differenced price series (ARIMA(1,1,0) style).
+
+    Models short-term persistence of daily price *changes*:
+    Δp[t] = μ_Δ + φ · (Δp[t-1] − μ_Δ) + ε[t]
+
+    The AR coefficient φ is estimated via the lag-1 Yule-Walker equation on
+    the de-meaned differences.  We clamp |φ| ≤ 0.90 to prevent explosive
+    long-horizon extrapolation — fuel prices are bounded by market forces.
+
+    Why differences rather than levels?
+    • Fuel prices are non-stationary (trending); AR on levels would conflate
+      the long-run mean with the current level and produce biased estimates.
+    • Daily *changes* are approximately stationary: small, with weak memory.
+    • A positive φ means "if price rose yesterday it tends to rise again today"
+      (momentum); φ near 0 means changes are unpredictable from history alone.
+
+    Returns *n_forecast* predicted price levels (not changes).
+    """
+    n = len(prices)
+    if n < _AR1_MIN_POINTS:
+        return [round(prices[-1], 4)] * n_forecast
+
+    diffs = [prices[i] - prices[i - 1] for i in range(1, n)]
+    nd = len(diffs)
+    mu_d = mean(diffs)
+
+    # De-mean differences for Yule-Walker
+    yd = [d - mu_d for d in diffs]
+    if nd >= 2:
+        cov = sum(yd[i] * yd[i - 1] for i in range(1, nd)) / (nd - 1)
+        var = sum(yi ** 2 for yi in yd) / nd
+        phi = cov / var if var > 1e-12 else 0.0
+        phi = max(-_AR1_PHI_MAX, min(_AR1_PHI_MAX, phi))
+    else:
+        phi = 0.0
+
+    # Iterate forecasts from the last observed price
+    last_level = prices[-1]
+    last_innov = diffs[-1] - mu_d   # last de-meaned change
+
+    result: list[float] = []
+    innov = last_innov
+    level = last_level
+    for _ in range(n_forecast):
+        innov = phi * innov           # AR(1) update on de-meaned change
+        delta = mu_d + innov          # predicted change = mean + AR innovation
+        level = level + delta
+        result.append(round(level, 4))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Mean-reversion nudge
+# ---------------------------------------------------------------------------
+
+def _mean_reversion_adjustment(
+    predicted: list[float],
+    prices: list[float],
+) -> list[float]:
+    """Apply a gentle pull toward the long-term mean when prices deviate far.
+
+    Activation: only when the current price deviates more than
+    *_MEAN_REVERSION_THRESHOLD* (4 %) from the mean of all available history.
+
+    The correction is linear and capped: at most *_MEAN_REVERSION_DAILY_RATE*
+    (0.4 %) of the mean per day, so the total 7-day pull is ≤ 2.8 %.
+
+    This prevents the trend-following models from extrapolating indefinitely
+    during unusual price spikes or troughs, while having zero effect during
+    normal price fluctuations within ±4 % of the historical mean.
+
+    The correction is applied before clamping so the clamping bounds still
+    provide the hard safety net.
+    """
+    n = len(prices)
+    if n < _MIN_POINTS_MEDIUM:
+        return predicted
+
+    long_mean = mean(prices)
+    current = prices[-1]
+    if long_mean == 0:
+        return predicted
+
+    deviation = (current - long_mean) / long_mean
+    if abs(deviation) <= _MEAN_REVERSION_THRESHOLD:
+        return predicted  # within normal range — no adjustment
+
+    # Daily pull magnitude (capped per day)
+    pull_per_day = min(abs(deviation) * 0.10, _MEAN_REVERSION_DAILY_RATE) * long_mean
+    direction = -1.0 if deviation > 0 else 1.0  # pull toward mean
+
+    result: list[float] = []
+    for i, p in enumerate(predicted):
+        correction = direction * pull_per_day * (i + 1)
+        result.append(round(p + correction, 4))
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,8 @@ from custom_components.carburanti_mimit.prediction import (
     _ewols_regression,
     _build_geopolitical_prompt,
     _holt_exponential_smoothing,
+    _ar1_diff_forecast,
+    _mean_reversion_adjustment,
     _response_token_budget,
     compute_prediction,
 )
@@ -305,17 +307,26 @@ class TestAIPromptContextExpansion:
 
 
 class TestEnsembleMethod:
+    # Full set of valid method names (expanded with AR(1) variants)
+    ALL_METHODS = {
+        "ensemble_ols_holt_ar1",
+        "ensemble_ols_holt",
+        "ensemble_holt_ar1",
+        "holt_exponential_smoothing",
+        "moving_average",
+    }
+
     def test_ensemble_used_when_ewols_r2_sufficient(self):
         """30-point linear rising history → EWOLS R² high → ensemble method."""
         result = compute_prediction(_rising_history(30), "Benzina")
         assert result is not None
-        assert result.method_used in ("ensemble_ols_holt", "holt_exponential_smoothing", "moving_average")
+        assert result.method_used in self.ALL_METHODS
 
-    def test_holt_only_when_few_points(self):
-        """5–13 points → can't use EWOLS ensemble (< 14), use Holt."""
+    def test_holt_or_ar1_ensemble_when_few_points(self):
+        """5–13 points: Holt and/or AR1 used; pure EWOLS ensemble not possible."""
         result = compute_prediction(_flat_history(8), "Benzina")
         assert result is not None
-        assert result.method_used in ("holt_exponential_smoothing", "moving_average")
+        assert result.method_used in ("ensemble_holt_ar1", "holt_exponential_smoothing", "moving_average")
 
     def test_wma_fallback_with_very_few_points(self):
         """< 5 points → Holt not available → WMA fallback."""
@@ -324,12 +335,25 @@ class TestEnsembleMethod:
         assert result.method_used == "moving_average"
 
     def test_method_used_values_valid(self):
-        """method_used must be one of the three valid values."""
-        valid = {"ensemble_ols_holt", "holt_exponential_smoothing", "moving_average"}
+        """method_used must be one of the known valid values."""
         for n in [3, 8, 14, 30]:
             result = compute_prediction(_rising_history(n), "Benzina")
             if result:
-                assert result.method_used in valid
+                assert result.method_used in self.ALL_METHODS
+
+    def test_ar1_ensemble_with_sufficient_history(self):
+        """≥14 points with high R² should use the 3-way AR1 ensemble."""
+        result = compute_prediction(_rising_history(30), "Benzina")
+        assert result is not None
+        # With 30 linear points, EWOLS R² is high → expect 3-way ensemble
+        assert result.method_used in ("ensemble_ols_holt_ar1", "ensemble_ols_holt")
+
+    def test_predicted_price_7d_populated(self):
+        """predicted_price_7d should equal predicted_prices[6]."""
+        result = compute_prediction(_flat_history(20), "Benzina")
+        assert result is not None
+        assert result.predicted_price_7d is not None
+        assert result.predicted_price_7d == pytest.approx(result.predicted_prices[6])
 
 
 class TestVolatilityAdaptiveClamping:
@@ -394,3 +418,131 @@ class TestGapInterpolation:
         # Should not raise
         result = compute_prediction(history, "Benzina")
         assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# AR(1) on first differences
+# ---------------------------------------------------------------------------
+
+class TestAR1DiffForecast:
+    def test_returns_seven_forecasts(self):
+        forecasts = _ar1_diff_forecast([1.800] * 10)
+        assert len(forecasts) == 7
+
+    def test_flat_series_stays_flat(self):
+        """Flat prices → all diffs = 0 → AR(1) predicts flat continuation."""
+        forecasts = _ar1_diff_forecast([1.800] * 15)
+        for f in forecasts:
+            assert abs(f - 1.800) < 0.005
+
+    def test_rising_series_continues_upward(self):
+        """Steady rise → positive mean diff → forecast above last price."""
+        prices = [1.700 + i * 0.005 for i in range(20)]
+        forecasts = _ar1_diff_forecast(prices)
+        assert forecasts[0] > prices[-1]
+
+    def test_falling_series_continues_downward(self):
+        """Steady fall → negative mean diff → forecast below last price."""
+        prices = [1.900 - i * 0.005 for i in range(20)]
+        forecasts = _ar1_diff_forecast(prices)
+        assert forecasts[0] < prices[-1]
+
+    def test_degenerate_too_few_points_returns_flat(self):
+        """< 6 points → flat fallback at last price."""
+        prices = [1.800, 1.810, 1.820]
+        forecasts = _ar1_diff_forecast(prices)
+        assert len(forecasts) == 7
+        for f in forecasts:
+            assert abs(f - prices[-1]) < 0.001
+
+    def test_single_price_no_crash(self):
+        forecasts = _ar1_diff_forecast([1.800])
+        assert len(forecasts) == 7
+
+    def test_prices_reasonable_range(self):
+        """Even with volatile history, AR(1) should stay in a sane range."""
+        import random
+        random.seed(42)
+        prices = [1.800 + random.gauss(0, 0.03) for _ in range(30)]
+        forecasts = _ar1_diff_forecast(prices)
+        for f in forecasts:
+            assert 0.5 < f < 5.0   # sanity bounds for EUR/L fuel
+
+
+# ---------------------------------------------------------------------------
+# Mean-reversion adjustment
+# ---------------------------------------------------------------------------
+
+class TestMeanReversionAdjustment:
+    def test_no_adjustment_within_threshold(self):
+        """Prices within ±4 % of mean → no change."""
+        prices = [1.800] * 30
+        predicted = [1.805, 1.806, 1.807, 1.808, 1.809, 1.810, 1.811]
+        adjusted = _mean_reversion_adjustment(predicted, prices)
+        for orig, adj in zip(predicted, adjusted):
+            assert adj == pytest.approx(orig)
+
+    def test_downward_nudge_when_above_mean(self):
+        """Current price 10 % above 90-day mean → predictions nudged down."""
+        # history around 1.700, current at 1.870
+        prices = [1.700] * 28 + [1.870, 1.870]
+        predicted = [1.880] * 7
+        adjusted = _mean_reversion_adjustment(predicted, prices)
+        # Each adjusted value should be <= original (pulled down)
+        for orig, adj in zip(predicted, adjusted):
+            assert adj <= orig + 0.001
+
+    def test_upward_nudge_when_below_mean(self):
+        """Current price 10 % below 90-day mean → predictions nudged up."""
+        prices = [1.800] * 28 + [1.620, 1.620]
+        predicted = [1.615] * 7
+        adjusted = _mean_reversion_adjustment(predicted, prices)
+        for orig, adj in zip(predicted, adjusted):
+            assert adj >= orig - 0.001
+
+    def test_no_adjustment_with_short_history(self):
+        """< 14 points → no adjustment (insufficient context)."""
+        prices = [1.800] * 8 + [2.000, 2.000]
+        predicted = [2.010] * 7
+        adjusted = _mean_reversion_adjustment(predicted, prices)
+        for orig, adj in zip(predicted, adjusted):
+            assert adj == pytest.approx(orig)
+
+    def test_correction_grows_with_day_index(self):
+        """Correction should increase (in absolute terms) across the 7-day window."""
+        prices = [1.700] * 28 + [1.900, 1.900]
+        predicted = [1.910] * 7
+        adjusted = _mean_reversion_adjustment(predicted, prices)
+        diffs = [abs(predicted[i] - adjusted[i]) for i in range(7)]
+        # Correction should be non-decreasing across the forecast horizon
+        for i in range(1, 7):
+            assert diffs[i] >= diffs[i - 1] - 1e-9  # allow floating point tolerance
+
+
+# ---------------------------------------------------------------------------
+# 90-day history integration
+# ---------------------------------------------------------------------------
+
+class Test90DayHistory:
+    def test_prediction_with_90_day_history(self):
+        """compute_prediction should work with up to 90 days of history."""
+        history = _make_history([1.700 + i * 0.001 for i in range(90)])
+        result = compute_prediction(history, "Benzina")
+        assert result is not None
+        assert len(result.predicted_prices) == 7
+        assert result.confidence in ("medium", "high")
+
+    def test_monthly_change_available_with_90_days(self):
+        """monthly_change_pct should be populated when ≥31 snapshots exist."""
+        history = _make_history([1.750 + i * 0.001 for i in range(60)])
+        result = compute_prediction(history, "Benzina")
+        assert result is not None
+        assert result.monthly_change_pct is not None
+
+    def test_predicted_price_7d_with_large_history(self):
+        """predicted_price_7d should always equal predicted_prices[6] regardless of history size."""
+        for n in [14, 30, 60, 90]:
+            history = _make_history([1.800 + i * 0.001 for i in range(n)])
+            result = compute_prediction(history, "Benzina")
+            assert result is not None
+            assert result.predicted_price_7d == pytest.approx(result.predicted_prices[6])
